@@ -5,6 +5,7 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-kv-cache.h"
+#include "llama-sparkinfer.h"
 
 #include <cstring>
 #include <stdexcept>
@@ -122,6 +123,7 @@ llama_context::llama_context(
                 __func__, n_ctx_per_seq, hparams.n_ctx_train);
     }
 
+    // backends preprocess
     if (!hparams.vocab_only) {
         // GPU backends
         for (auto * dev : model.devices) {
@@ -363,7 +365,13 @@ llama_context::llama_context(
             LLAMA_LOG_INFO("%s: graph splits = %d (with bs=%d), %d (with bs=1)\n", __func__, n_splits_pp, n_tokens, n_splits_tg);
         }
     }
+
+    // init sparkinfer_cache_manager if use sparkinfer
+    if (!hparams.vocab_only && llama_use_sparkinfer(&model)) {
+        spif_cache_mng.reset(model.create_spif_cache_mng(cparams));
+    }
 }
+
 
 llama_context::~llama_context() {
     ggml_opt_free(opt_ctx);
@@ -1275,6 +1283,7 @@ llm_graph_result_ptr llama_context::graph_build(
                 /*.cross       =*/ &cross,
                 /*.n_outputs   =*/ n_outputs,
                 /*.cb          =*/ graph_get_cb(),
+                /*.spif_cache  =*/ spif_cache_mng.get(),
             }, gf, gtype);
 }
 

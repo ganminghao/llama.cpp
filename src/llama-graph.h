@@ -393,6 +393,8 @@ struct llm_graph_params {
     int32_t n_outputs;
 
     const llm_graph_cb & cb;
+
+    llama_memory_i * spif_cache = nullptr; // optional cache manager (for spif models)
 };
 
 struct llama_runtime_layer {
@@ -453,6 +455,7 @@ struct llm_graph_context {
     const llama_adapter_cvec  * cvec;
     const llama_adapter_loras * loras;
     const llama_memory_i      * memory;
+    const llama_memory_i      * spif_cache;
     const llama_cross         * cross;
 
     const llm_graph_cb & cb_func;

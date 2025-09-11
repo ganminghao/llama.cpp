@@ -6,6 +6,7 @@
 #include "llama-cparams.h"
 #include "llama-model-loader.h"
 #include "llama-kv-cache.h"
+#include "llama-sparkinfer.h"
 #include "llama.h"
 
 #include "ggml-cpp.h"
@@ -14905,6 +14906,25 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             hparams.swa_type);
                 }
             }
+    }
+
+    return res;
+}
+
+llama_memory_i * llama_model::create_spif_cache_mng(llama_cparams & cparams) const {
+    llama_memory_i * res = nullptr;
+
+    switch (arch) {
+        case LLM_ARCH_PRO_SPARSE_LLAMA:
+        case LLM_ARCH_OPT:
+        {
+            res = new sparkinfer_cache_manager(*this, cparams);
+        }
+        break;
+        default:
+        {
+            res = nullptr;
+        }
     }
 
     return res;

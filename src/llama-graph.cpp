@@ -452,7 +452,8 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     memory           (params.memory),
     cross            (params.cross),
     cb_func          (params.cb),
-    res              (std::make_unique<llm_graph_result>())
+    res              (std::make_unique<llm_graph_result>()),
+    spif_cache       (params.spif_cache)
     {
         runtime_buf = std::make_unique<llama_runtime_buffer>(static_cast<int>(n_layer));
     }
@@ -865,8 +866,11 @@ ggml_tensor * build_reload(
 ggml_tensor * llm_graph_context::build_sparse_ffn(
            const llama_model * model,
                  ggml_tensor * input,
-                         int   il) const{          
-
+                         int   il) const{      
+    
+        const sparkinfer_cache_manager * spif_cache = static_cast<const sparkinfer_cache_manager*>(spif_cache);
+        const layer_cache * spif_layer = spif_cache ? spif_cache->get_layer_cache(il) : nullptr;
+        
         const struct llama_layer *L      = &(model->layers[il]);
         const struct llama_layer *L_next = il == (n_layer - 1) ? nullptr : &(model->layers[il+1]);
         llama_runtime_layer & R = runtime_buf->layers[il];
@@ -890,9 +894,9 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(
             R_next->sparse_idx = next_sparse_idx;
 
             // GTODO[reload]: build reload
-            if(!next_full_gpu){
-                ggml_tensor * done_reload = build_reload(ctx0, next_sparse_idx, L_next); // GTODO[reload] how do we use the done_reload tensor as prerequisite?
-            }
+            // if(!next_full_gpu){
+            //     ggml_tensor * done_reload = build_reload(ctx0, next_sparse_idx, L_next); // GTODO[reload] how do we use the done_reload tensor as prerequisite?
+            // }
         }
 
         // sparse_ffn  GTODO: use integrated kernel?
@@ -942,7 +946,7 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(
                 
                 cur = gate_out;
             }else{
-                cur = up_out;
+                cur = ggml_relu(ctx0, up_out);
             }
 
             cur = build_sparse_axpy(cur, down, gpu_down, gpu_neu_idx, gpu_neu_mask, sparse_idx, "down", il, full_gpu); 

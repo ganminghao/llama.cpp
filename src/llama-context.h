@@ -5,6 +5,7 @@
 #include "llama-cparams.h"
 #include "llama-graph.h"
 #include "llama-adapter.h"
+#include "llama-sparkinfer.h"
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
@@ -14,6 +15,7 @@
 
 struct llama_model;
 struct llama_kv_cache;
+struct sparkinfer_cache_manager;
 
 class llama_io_read_i;
 class llama_io_write_i;
@@ -213,6 +215,7 @@ private:
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 
     std::unique_ptr<llama_memory_i> memory;
+    std::unique_ptr<llama_memory_i> spif_cache_mng;
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])
     size_t  logits_size = 0; // capacity (of floats) for logits

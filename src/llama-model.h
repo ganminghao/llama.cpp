@@ -6,6 +6,8 @@
 #include "llama-hparams.h"
 #include "llama-memory.h"
 #include "llama-vocab.h"
+#include "llama-context.h"
+#include "llama-sparkinfer.h"
 
 #include <memory>
 #include <string>
@@ -15,6 +17,8 @@
 struct llama_cparams;
 struct llama_ubatch;
 struct llama_model_loader;
+struct llama_context;
+struct sparkinfer_cache_manager;
 
 // available models
 enum llm_type {
@@ -439,6 +443,7 @@ struct llama_model {
     // note: can mutate `cparams`
     // TODO: move this to new llm_arch_model_i interface
     llama_memory_i * create_memory(const llama_memory_params & params, llama_cparams & cparams) const;
+    llama_memory_i * create_spif_cache_mng(llama_cparams & cparams) const;
 
     // TODO: move this to new llm_arch_model_i interface
     llm_graph_result_ptr build_graph(
