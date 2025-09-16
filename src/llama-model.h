@@ -221,16 +221,25 @@ struct llama_layer {
     struct ggml_tensor * ffn_pred_up_b       = nullptr; 
     struct ggml_tensor * ffn_pred_down_b     = nullptr; 
 
+    // [YPX] [GTODO] for group cache (need to be read from .gguf!)
+    int ffn_group_size = 0;
+    struct ggml_tensor * ffn_group_to_neurons_map   = nullptr;
+    struct ggml_tensor * ffn_neuron_to_group_map    = nullptr;
+
     // ffn slice on gpu
     struct ggml_tensor * ffn_gpu_gate       = nullptr;
     struct ggml_tensor * ffn_gpu_down_t     = nullptr;
     struct ggml_tensor * ffn_gpu_up         = nullptr;
+    struct ggml_tensor * ffn_gpu_gate_b     = nullptr;
+    struct ggml_tensor * ffn_gpu_up_b       = nullptr;
+    struct ggml_tensor * ffn_gpu_down_b     = nullptr;
 
     // ffn sparse infernece relevant 
     struct ggml_tensor * ffn_gpu_neu_idx          = nullptr; // on gpu
     struct ggml_tensor * ffn_gpu_neu_mask         = nullptr;
-    struct ggml_tensor * ffn_gpu_group_idx        = nullptr; // on gpu
-    struct ggml_tensor * ffn_gpu_group_mask       = nullptr;
+    // [YPX] [C] cache_manager 用不到，cpu/gpu 算子也用不到，故注释掉了
+    // struct ggml_tensor * ffn_gpu_group_idx        = nullptr; // on gpu
+    // struct ggml_tensor * ffn_gpu_group_mask       = nullptr;
     struct ggml_tensor * ffn_neuron_to_group_map  = nullptr;
     float gpu_offload_ratio = 0.0f;
     

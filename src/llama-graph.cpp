@@ -5,6 +5,7 @@
 #include "llama-cparams.h"
 #include "llama-kv-cache.h"
 #include "llama-model.h"
+#include "llama-sparkinfer.h"
 
 #include <cassert>
 #include <cmath>
@@ -868,8 +869,8 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(
                  ggml_tensor * input,
                          int   il) const{      
     
-        const sparkinfer_cache_manager * spif_cache = static_cast<const sparkinfer_cache_manager*>(spif_cache);
-        const layer_cache * spif_layer = spif_cache ? spif_cache->get_layer_cache(il) : nullptr;
+        const sparkinfer_cache_manager * spif_cache_manager = static_cast<const sparkinfer_cache_manager*>(this->spif_cache);
+        const layer_cache * spif_layer = spif_cache_manager ? spif_cache->get_layer_cache(il) : nullptr;
         
         const struct llama_layer *L      = &(model->layers[il]);
         const struct llama_layer *L_next = il == (n_layer - 1) ? nullptr : &(model->layers[il+1]);
@@ -893,10 +894,12 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(
 
             R_next->sparse_idx = next_sparse_idx;
 
-            // GTODO[reload]: build reload
-            // if(!next_full_gpu){
-            //     ggml_tensor * done_reload = build_reload(ctx0, next_sparse_idx, L_next); // GTODO[reload] how do we use the done_reload tensor as prerequisite?
-            // }
+            if(!next_full_gpu){
+                ggml_tensor * done_reload = build_sparse_reload_group(ctx0, next_sparse_idx, L_next); 
+                // GTODO[reload] how do we use the done_reload tensor as prerequisite?
+                // [YPX] [C] 我的 AI 推荐我把 down_reload 修改为 new_gpu_neu_idx
+                // [YPX] [C] 然后这么写：R_next->gpu_neu_idx = done_reload;
+            }
         }
 
         // sparse_ffn  GTODO: use integrated kernel?
@@ -959,6 +962,17 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(
         
         return cur;
     }
+
+
+ggml_tensor * build_sparse_reload_group(
+        ggml_context * ctx,
+        ggml_tensor * sparse_idx,
+        const struct llama_layer *L
+){
+    // Step 1: sparkinfer_cache_manager::plan_reload()，以获得更新方案
+    // Step 2: ggml_reload()，以构建 GGML_OP_RELOAD 节点，更新权重
+    // Step 3: 更新 CPU 上的 元数据，以及调用 ggml_cpy()，以更新 GPU 上的元数据
+}
 
 ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * cur,
