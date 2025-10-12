@@ -716,8 +716,11 @@ static int ggml_backend_sched_backend_from_buffer(ggml_backend_sched_t sched, co
     return -1;
 }
 
-#if 0
+
+#ifdef SPARKINFER_SCHEDULE_DEBUG
+#pragma message("SPARKINFER_SCHEDULE_DEBUG is ENABLED")
 #define GGML_SCHED_MAX_SPLITS_DEBUG 4096
+static int ggml_sched_debug_time = 0;
 static char causes[GGML_DEFAULT_GRAPH_SIZE*16 + GGML_SCHED_MAX_SPLITS_DEBUG*GGML_SCHED_MAX_SPLIT_INPUTS][128]; // debug only
 #define SET_CAUSE(node, ...) sprintf(causes[hash_id(node)], __VA_ARGS__)
 #define GET_CAUSE(node) causes[hash_id(node)]
@@ -888,6 +891,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         // do not overwrite user assignments
         if (*leaf_backend_id == -1) {
             *leaf_backend_id = ggml_backend_sched_backend_id_from_cur(sched, leaf);
+            #ifdef SPARKINFER_SCHEDULE_DEBUG
+            if (ggml_sched_debug_time ==0){
+            GGML_LOG_INFO("PASS1 LEAF: name=%s, op=%s, backend=%d (%s), cause=%s\n",
+                leaf->name ? leaf->name : "(unnamed)",
+                ggml_op_name(leaf->op),
+                *leaf_backend_id,
+                ggml_backend_name(sched->backends[*leaf_backend_id]),
+                GET_CAUSE(leaf));
+            }
+            #endif
         }
     }
 
@@ -897,6 +910,16 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         // do not overwrite user assignments
         if (*node_backend_id == -1) {
             *node_backend_id = ggml_backend_sched_backend_id_from_cur(sched, node);
+            #ifdef SPARKINFER_SCHEDULE_DEBUG
+            if (ggml_sched_debug_time ==0){
+                GGML_LOG_INFO("PASS1 NODE: name=%s, op=%s, backend=%d (%s), cause=%s\n",
+                    node->name ? node->name : "(unnamed)",
+                    ggml_op_name(node->op),
+                    *node_backend_id,
+                    *node_backend_id!=-1 ? ggml_backend_name(sched->backends[*node_backend_id]) : "null",
+                    GET_CAUSE(node));
+            }
+            #endif
 
 #if 0
             // src
@@ -917,6 +940,9 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
 #endif
         }
     }
+    #ifdef SPARKINFER_SCHEDULE_DEBUG
+        ggml_sched_debug_time += 1;
+    #endif
 
     // pass 2: expand current backend assignments
     // assign the same backend to adjacent nodes
@@ -1221,9 +1247,9 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         sched->n_splits = i_split + 1;
     }
 
-    if (sched->debug) {
+    #ifdef SPARKINFER_SCHEDULE_DEBUG
         ggml_backend_sched_print_assignments(sched, graph);
-    }
+    #endif
 
     // swap node_backend_ids and leaf _backend_ids with prevs
     {

@@ -63,6 +63,7 @@ endif()
 # debug
 option(LLAMA_ALL_WARNINGS           "llama: enable all compiler warnings"                   ON)
 option(LLAMA_ALL_WARNINGS_3RD_PARTY "llama: enable all compiler warnings in 3rd party libs" OFF)
+option(SPARKINFER_SCHEDULE_DEBUG "Enable GGML scheduler debug cause logging" OFF)
 
 # build
 option(LLAMA_FATAL_WARNINGS "llama: enable -Werror flag" OFF)
@@ -155,7 +156,12 @@ if (LLAMA_USE_SYSTEM_GGML)
 endif()
 
 if (NOT TARGET ggml AND NOT LLAMA_USE_SYSTEM_GGML)
+    if(SPARKINFER_SCHEDULE_DEBUG)
+        set(GGML_SPARKINFER_SCHEDULE_DEBUG ON CACHE INTERNAL "")
+        message(STATUS "Enabling GGML scheduler debug logging")
+    endif()
     add_subdirectory(ggml)
+    
     # ... otherwise assume ggml is added by a parent CMakeLists.txt
 endif()
 

@@ -343,3 +343,9 @@ if (BUILD_SHARED_LIBS)
         target_compile_definitions(${target} PUBLIC  GGML_SHARED)
     endforeach()
 endif()
+
+
+if(GGML_SPARKINFER_SCHEDULE_DEBUG)
+    message(STATUS "add definition SPARKINFER_SCHEDULE_DEBUG for ggml-base ggml")
+    target_compile_definitions(ggml-base PRIVATE SPARKINFER_SCHEDULE_DEBUG)
+endif()

@@ -591,7 +591,6 @@ ggml_tensor * llm_graph_context::build_ffn(
     }
 
     if (gate) {
-        GGML_ASSERT(type_gate != LLM_FFN_NOGATE);
         switch (type_gate) {
             case LLM_FFN_SEQ:
                 {
@@ -678,8 +677,11 @@ ggml_tensor * llm_graph_context::build_ffn(
     }
 
     if (down_b) {
-        cur = ggml_add(ctx0, cur, down_b);
         cb(cur, "ffn_down", il);
+    }
+
+    if (down_b) {
+        cur = ggml_add(ctx0, cur, down_b);
     }
 
     if (down_s) {
@@ -689,6 +691,7 @@ ggml_tensor * llm_graph_context::build_ffn(
 
     return cur;
 }
+
 
 // build ffn sparse mul_mat graph
 ggml_tensor * llm_graph_context::build_sparse_mul_mat(

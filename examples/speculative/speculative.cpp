@@ -93,6 +93,11 @@ int main(int argc, char ** argv) {
     const llama_vocab * vocab_tgt = llama_model_get_vocab(model_tgt);
     const llama_vocab * vocab_dft = llama_model_get_vocab(model_dft);
 
+    if (!vocab_tgt || !vocab_dft) {
+        fprintf(stderr, "Error: vocab is null. Model or context failed to load.\n");
+        return 1;
+    }
+
     const bool vocab_type_tgt = llama_vocab_type(vocab_tgt);
     LOG_DBG("vocab_type tgt: %d\n", vocab_type_tgt);
 
