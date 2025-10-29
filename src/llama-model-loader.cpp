@@ -471,10 +471,11 @@ namespace GGUFMeta {
 llama_model_loader::llama_model_loader(
         const std::string & fname,
         std::vector<std::string> & splits,
+        const std::string & spif_ms_path,
         bool use_mmap,
         bool check_tensors,
         const llama_model_kv_override * param_overrides_p,
-        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p) {
+        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p) : spif_ms_path(spif_ms_path) {
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
         trace = atoi(getenv("LLAMA_TRACE"));

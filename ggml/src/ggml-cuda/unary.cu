@@ -560,3 +560,48 @@ void ggml_cuda_op_leaky_relu(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
         leaky_relu_cuda((const float *)src0_d, (float *)dst_d, ggml_nelements(src0), negative_slope, stream);
     }
 }
+
+/* fatrelu */
+
+static __device__ __forceinline__ float op_fatrelu(float x, const float threshold) {
+    return (x > threshold) ? x : 0;
+}
+
+template <class T>
+static __global__ void fatrelu_kernel(const T * x, T * dst, const int k, const float threshold) {
+    const int i  = blockDim.x*blockIdx.x + threadIdx.x;
+
+    if (i >= k) {
+        return;
+    }
+
+    dst[i] = (T)op_fatrelu((float)x[i], threshold);
+}
+
+template <class T>
+static void fatrelu_cuda(const T * x, T * dst, const int k, const float threshold, cudaStream_t stream) {
+    const int num_blocks = (k + CUDA_RELU_BLOCK_SIZE - 1) / CUDA_RELU_BLOCK_SIZE;
+    fatrelu_kernel<<<num_blocks, CUDA_RELU_BLOCK_SIZE, 0, stream>>>(x, dst, k, threshold);
+}
+
+void ggml_cuda_op_fatrelu(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const void * src0_d = src0->data;
+    void * dst_d = dst->data;
+    cudaStream_t stream = ctx.stream();
+
+    GGML_ASSERT(ggml_is_contiguous(src0));
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
+    GGML_ASSERT( dst->type == GGML_TYPE_F32 ||  dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(src0->type == dst->type);
+
+    float threshold;
+    memcpy(&threshold, dst->op_params, sizeof(float));
+
+    if (src0->type == GGML_TYPE_F16) {
+        fatrelu_cuda((const half *)src0_d, (half *)dst_d, ggml_nelements(src0), threshold, stream);
+    } else {
+        fatrelu_cuda((const float *)src0_d, (float *)dst_d, ggml_nelements(src0), threshold, stream);
+    }
+}

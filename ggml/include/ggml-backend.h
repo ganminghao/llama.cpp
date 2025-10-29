@@ -339,6 +339,23 @@ extern "C" {
     // Set a callback to be called for each resulting node during graph compute
     GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
 
+    // Sparkinfer: data structures and functions used in SPIF_PARALLEL
+    enum sparkinfer_event_state { SPIF_MANUAL = 1, SPIF_RECORD = 2, SPIF_WAIT = 3, SPIF_SYNCHRONIZE = 4 };
+
+    enum sparkinfer_node_state { SPIF_ASYNC_SPLIT_HEAD = 1, SPIF_ASYNC_SPLIT_TAIL = 2 };
+
+    typedef struct sparkinfer_tensor_extra {
+        enum sparkinfer_event_state states[GGML_MAX_SRC];
+        ggml_backend_event_t        events[GGML_MAX_SRC];
+        int                         event_count;
+        enum sparkinfer_node_state  async_split;
+        void *                      spif_executor;
+    } sparkinfer_tensor_extra;
+
+    GGML_API void sparkinfer_register_dependency(ggml_backend_sched_t sched, struct ggml_tensor * src, struct ggml_tensor * dst, ggml_backend_t event_backend, enum sparkinfer_event_state src_state, enum sparkinfer_event_state dst_state);
+
+    GGML_API void sparkinfer_set_node_flags(ggml_backend_sched_t sched, struct ggml_tensor * tensor, enum sparkinfer_node_state async_split);
+
     //
     // Utils
     //

@@ -21,6 +21,8 @@ class llama_io_write_i;
 struct llama_memory_i;
 struct llama_memory_context_i;
 
+struct sparkinfer_cache_manager;
+
 // "memory" as in physical memory for a buffer type, in bytes
 struct llama_memory_breakdown_data {
     size_t model   = 0; // memory allocated for the model
@@ -207,6 +209,9 @@ public:
 
     // reserve a graph with a dummy ubatch of the specified size
     ggml_cgraph * graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only = false);
+
+    // sparkinfer
+    sparkinfer_cache_manager * spif_cm = nullptr;
 
 private:
     llm_graph_params graph_params(
