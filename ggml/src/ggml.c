@@ -928,6 +928,8 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "SUB",
     "MUL",
     "DIV",
+    "XOR",
+    "AND",
     "SQR",
     "SQRT",
     "LOG",
@@ -935,6 +937,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "COS",
     "SUM",
     "SUM_ROWS",
+    "SUM_COLS",
     "CUMSUM",
     "MEAN",
     "ARGMAX",
@@ -951,6 +954,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
 
     "MUL_MAT",
     "MUL_MAT_ID",
+
+    "MUL_MAT_SPARSE",
+    "AXPY_SPARSE",
+    "RELOAD_EXEC",
+
     "OUT_PROD",
 
     "SCALE",
@@ -991,6 +999,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "TIMESTEP_EMBEDDING",
     "ARGSORT",
     "LEAKY_RELU",
+    "FATRELU",
     "TRI",
     "FILL",
 
@@ -1023,7 +1032,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 94, "GGML_OP_COUNT != 94");
+static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1098,7 +1107,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "arange(start, stop, step)",
     "timestep_embedding(timesteps, dim, max_period)",
     "argsort(x)",
-    "leaky_relu(x)",
+    "fatrelu(x)",
     "tri(x)",
     "fill(x, c)",
 
@@ -1130,8 +1139,6 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
 
     "glu(x)",
 };
-
-static_assert(GGML_OP_COUNT == 94, "GGML_OP_COUNT != 94");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -2190,6 +2197,40 @@ struct ggml_tensor * ggml_div_inplace(
     return ggml_div_impl(ctx, a, b, true);
 }
 
+// ggml bitwise xor(^)
+
+struct ggml_tensor * ggml_xor(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b) {
+    GGML_ASSERT(ggml_can_repeat(b, a));
+
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
+
+    result->op     = GGML_OP_XOR;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
+}
+
+// ggml bitwise and(&)
+
+struct ggml_tensor * ggml_and(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b) {
+    GGML_ASSERT(ggml_can_repeat(b, a));
+
+    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
+
+    result->op     = GGML_OP_AND;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
+}
+
 // ggml_sqr
 
 static struct ggml_tensor * ggml_sqr_impl(
@@ -2370,6 +2411,28 @@ struct ggml_tensor * ggml_sum_rows(
     struct ggml_tensor * result = ggml_new_tensor(ctx, a->type, GGML_MAX_DIMS, ne);
 
     result->op     = GGML_OP_SUM_ROWS;
+    result->src[0] = a;
+
+    return result;
+}
+
+// ggml_sum_cols
+
+struct ggml_tensor * ggml_sum_cols(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a) {
+    int64_t ne[GGML_MAX_DIMS];
+    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+        if (i == 1) {
+            ne[1] = 1;
+        } else {
+            ne[i] = a->ne[i];
+        }
+    }
+
+    struct ggml_tensor * result = ggml_new_tensor(ctx, a->type, GGML_MAX_DIMS, ne);
+
+    result->op     = GGML_OP_SUM_COLS;
     result->src[0] = a;
 
     return result;
@@ -2630,6 +2693,23 @@ struct ggml_tensor * ggml_leaky_relu(
     ggml_set_op_params(result, &negative_slope, sizeof(negative_slope));
 
     result->op     = GGML_OP_LEAKY_RELU;
+    result->src[0] = a;
+
+    return result;
+}
+
+// ggml_fatrelu
+
+struct ggml_tensor * ggml_fatrelu(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        float                 threshold,
+        bool                  inplace) {
+    struct ggml_tensor * result = inplace ? ggml_view_tensor(ctx, a) : ggml_dup_tensor(ctx, a);
+
+    ggml_set_op_params(result, &threshold, sizeof(threshold));
+
+    result->op     = GGML_OP_FATRELU;
     result->src[0] = a;
 
     return result;
@@ -3161,6 +3241,53 @@ struct ggml_tensor * ggml_mul_mat(
     result->op     = GGML_OP_MUL_MAT;
     result->src[0] = a;
     result->src[1] = b;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_mul_mat_sparse(
+        struct ggml_context * ctx,
+        struct ggml_tensor *  a,
+        struct ggml_tensor *  b,
+        struct ggml_tensor *  sparse_idx,
+        struct ggml_tensor *  neu_info) {
+
+    GGML_ASSERT(ggml_can_mul_mat(a, b));
+    GGML_ASSERT(!ggml_is_transposed(a));
+    GGML_ASSERT(sparse_idx && "sparse_idx is required for mul_mat_sparse");
+
+    const int64_t        ne[4]  = { sparse_idx->ne[0], sparse_idx->ne[1], b->ne[2], b->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = GGML_OP_MUL_MAT_SPARSE;
+    result->src[0] = a;
+    result->src[1] = b;
+    result->src[2] = sparse_idx;
+    result->src[3] = neu_info;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_axpy_sparse(
+        struct ggml_context * ctx,
+        struct ggml_tensor *  a,
+        struct ggml_tensor *  b,
+        struct ggml_tensor *  sparse_idx,
+        struct ggml_tensor *  neu_info) {
+
+    // return ggml_mul_mat(ctx, ggml_cont(ctx, ggml_transpose(ctx, a)), b);
+
+    GGML_ASSERT(!ggml_is_transposed(a));
+    GGML_ASSERT(sparse_idx && "sparse_idx is required for mul_mat_sparse");
+
+    const int64_t        ne[4]  = { a->ne[0], b->ne[1], b->ne[2], b->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = GGML_OP_AXPY_SPARSE;
+    result->src[0] = a;
+    result->src[1] = b;
+    result->src[2] = sparse_idx;
+    result->src[3] = neu_info;
 
     return result;
 }

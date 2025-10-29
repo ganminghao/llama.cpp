@@ -11,6 +11,8 @@
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
 
+#include "llama-sparkinfer.h"
+
 #include "ggml-cpp.h"
 
 #include "models/models.h"
@@ -531,6 +533,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
         GGML_ASSERT(hparams.n_expert_groups == 0);
     }
 
+    std::fill(hparams.n_pred_lora.begin(),   hparams.n_pred_lora.end(),   0);
     std::fill(hparams.n_head_arr.begin(),    hparams.n_head_arr.end(),    0);
     std::fill(hparams.n_head_kv_arr.begin(), hparams.n_head_kv_arr.end(), 0);
     std::fill(hparams.n_ff_arr.begin(),      hparams.n_ff_arr.end(),      0);
@@ -601,7 +604,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
 
         ml.get_key(LLM_KV_ROPE_DIMENSION_COUNT, hparams.n_rot, false);
 
-        if (arch == LLM_ARCH_LLAMA || arch == LLM_ARCH_DECI || arch == LLM_ARCH_FALCON) {
+        if (arch == LLM_ARCH_LLAMA || arch == LLM_ARCH_PROSPARSE_LLAMA || arch == LLM_ARCH_DECI || arch == LLM_ARCH_FALCON) {
             if (hparams.n_rot != hparams.n_embd_head_k) {
                 throw std::runtime_error(format("invalid n_rot: %u, expected %u", hparams.n_rot, hparams.n_embd_head_k));
             }
@@ -650,6 +653,17 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                         case 80: type = hparams.n_head() == hparams.n_head_kv() ? LLM_TYPE_65B : LLM_TYPE_70B; break;
                         default: type = LLM_TYPE_UNKNOWN;
                     }
+                }
+            } break;
+        case LLM_ARCH_PROSPARSE_LLAMA:
+            {
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+                ml.get_key_or_arr(LLM_KV_PRED_LORA, hparams.n_pred_lora, hparams.n_layer, true);
+
+                switch (hparams.n_layer) {
+                    case 32: type = LLM_TYPE_7B; break;
+                    case 40: type = LLM_TYPE_13B; break;
+                    default: type = LLM_TYPE_UNKNOWN;
                 }
             } break;
         case LLM_ARCH_LLAMA4:
@@ -2553,6 +2567,64 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                                 layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {hparams.n_ff_shexp, n_embd}, 0);
                             }
                         }
+                    }
+                } break;
+            case LLM_ARCH_PROSPARSE_LLAMA:
+                {
+                    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+
+                    // output
+                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+                    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+
+                    // if output is NULL, init from the input tok embed
+                    if (output == NULL) {
+                        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
+                    }
+
+                    const auto & n_pred_lora = hparams.n_pred_lora;
+
+                    for (int i = 0; i < n_layer; ++i) {
+                        auto & layer = layers[i];
+
+                        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+
+                        layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
+                        layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd, n_embd_k_gqa}, 0);
+                        layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), {n_embd, n_embd_v_gqa}, 0);
+                        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+
+                        // optional bias tensors
+                        layer.bq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "bias", i), {n_embd},     TENSOR_NOT_REQUIRED);
+                        layer.bk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "bias", i), {n_embd_gqa}, TENSOR_NOT_REQUIRED);
+                        layer.bv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "bias", i), {n_embd_gqa}, TENSOR_NOT_REQUIRED);
+                        layer.bo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "bias", i), {n_embd},     TENSOR_NOT_REQUIRED);
+
+                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
+
+                        if (hparams.rope_scaling_type_train == LLAMA_ROPE_SCALING_TYPE_LONGROPE) {
+                            layer.rope_long  = create_tensor(tn(LLM_TENSOR_ROPE_FACTORS_LONG,  "weight", i), {n_rot/2}, TENSOR_NOT_REQUIRED | (i != 0 ? TENSOR_DUPLICATED : 0));
+                            layer.rope_short = create_tensor(tn(LLM_TENSOR_ROPE_FACTORS_SHORT, "weight", i), {n_rot/2}, TENSOR_NOT_REQUIRED | (i != 0 ? TENSOR_DUPLICATED : 0));
+                        }
+                        else {
+                            layer.rope_freqs = create_tensor(tn(LLM_TENSOR_ROPE_FREQS, "weight", i), {n_rot/2}, TENSOR_NOT_REQUIRED | (i != 0 ? TENSOR_DUPLICATED : 0));
+                        }
+
+                        // MLP predictor
+                        layer.ffn_pred_up     = create_tensor(tn(LLM_TENSOR_FFN_PRED_UP, "weight", i), { n_embd, n_pred_lora[i] }, 0);
+                        layer.ffn_pred_down   = create_tensor(tn(LLM_TENSOR_FFN_PRED_DOWN, "weight", i), { n_pred_lora[i], n_ff }, 0);
+                        layer.ffn_pred_up_b   = create_tensor(tn(LLM_TENSOR_FFN_PRED_UP, "bias", i), { n_pred_lora[i] }, TENSOR_NOT_REQUIRED);
+                        layer.ffn_pred_down_b = create_tensor(tn(LLM_TENSOR_FFN_PRED_DOWN, "bias", i), { n_ff }, TENSOR_NOT_REQUIRED);
+
+                        // MLP weight
+                        layer.ffn_gate   = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), { n_embd, n_ff }, 0);
+                        layer.ffn_down_t = create_tensor(tn(LLM_TENSOR_FFN_DOWN_T, "weight", i), { n_embd, n_ff }, 0);
+                        layer.ffn_up     = create_tensor(tn(LLM_TENSOR_FFN_UP, "weight", i), { n_embd, n_ff }, 0);
+
+                        // optional MLP bias
+                        layer.ffn_gate_b = create_tensor(tn(LLM_TENSOR_FFN_GATE, "bias", i), { n_ff }, TENSOR_NOT_REQUIRED);
+                        layer.ffn_down_b = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "bias", i), { n_embd }, TENSOR_NOT_REQUIRED);
+                        layer.ffn_up_b   = create_tensor(tn(LLM_TENSOR_FFN_UP, "bias", i), { n_ff }, TENSOR_NOT_REQUIRED);
                     }
                 } break;
             case LLM_ARCH_LLADA:
@@ -6441,6 +6513,12 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    // initialize sparkinfer cache manager
+    if (!ml.spif_ms_path.empty()) {
+        spif_cm        = new sparkinfer_cache_manager(ml.spif_ms_path, *this);
+        use_sparkinfer = true;
+    }
+
     return true;
 }
 
@@ -6894,6 +6972,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
 
     switch (arch) {
         case LLM_ARCH_LLAMA:
+        case LLM_ARCH_PROSPARSE_LLAMA:
             {
                 llm = std::make_unique<llm_build_llama>(*this, params);
             } break;
@@ -7342,6 +7421,7 @@ llama_model_params llama_model_default_params() {
         /*.check_tensors               =*/ false,
         /*.use_extra_bufts             =*/ true,
         /*.no_host                     =*/ false,
+        /*.spif_ms_path                =*/ nullptr,
     };
 
     return result;
@@ -7445,6 +7525,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
 
         // use what we call a normal RoPE, operating on pairs of consecutive head values
         case LLM_ARCH_LLAMA:
+        case LLM_ARCH_PROSPARSE_LLAMA:
         case LLM_ARCH_LLADA:
         case LLM_ARCH_LLAMA4:
         case LLM_ARCH_DECI:

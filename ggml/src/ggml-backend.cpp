@@ -20,6 +20,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <algorithm>
+#include <deque>
+#include <functional>
+#include <future>
+#include <memory>
+#include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 #ifdef __APPLE__
@@ -27,6 +34,86 @@
 #include <sys/sysctl.h>
 #endif
 
+// sparkinfer async kernel caller
+struct SingleThreadExecutor {
+    explicit SingleThreadExecutor(bool drop_on_stop = false) : drop_(drop_on_stop), stop_flag_(false) {
+        worker_ = std::thread([this] { loop(); });
+    }
+
+    SingleThreadExecutor(const SingleThreadExecutor &)             = delete;
+    SingleThreadExecutor & operator=(const SingleThreadExecutor &) = delete;
+
+    ~SingleThreadExecutor() { stop(); }
+
+    template <class F, class... Args> void post(F && f, Args &&... args) {
+        enqueue(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+    }
+
+    template <class F, class... Args>
+    auto submit(F && f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...>> {
+        using R = std::invoke_result_t<F, Args...>;
+        std::packaged_task<R()> task(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+        auto                    task_future = task.get_future();
+        auto                    task_ptr    = std::make_shared<std::packaged_task<R()>>(std::move(task));
+        enqueue([task_ptr]() { (*task_ptr)(); });
+        return task_future;
+    }
+
+    void stop() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (stop_flag_) {
+                return;
+            }
+            stop_flag_ = true;
+            if (drop_) {
+                tasks_.clear();
+            }
+        }
+        cv_.notify_one();
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    std::thread                       worker_;
+    std::mutex                        mtx_;
+    std::condition_variable           cv_;
+    std::deque<std::function<void()>> tasks_;
+    const bool                        drop_;
+    bool                              stop_flag_;
+
+    void enqueue(std::function<void()> fn) {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (stop_flag_) {
+                throw std::runtime_error("executor stopped");
+            }
+            tasks_.push_back(std::move(fn));
+        }
+        cv_.notify_one();
+    }
+
+    void loop() {
+        for (;;) {
+            std::function<void()> task;
+            {
+                std::unique_lock<std::mutex> lock(mtx_);
+                cv_.wait(lock, [this] { return stop_flag_ || !tasks_.empty(); });
+                if (stop_flag_ && (tasks_.empty() || drop_)) {
+                    break;
+                }
+                if (!tasks_.empty()) {
+                    task = std::move(tasks_.front());
+                    tasks_.pop_front();
+                } else {
+                    continue;
+                }
+            }
+            task();
+        }
+    }
+};
 
 // backend buffer type
 
@@ -690,6 +777,10 @@ struct ggml_backend_sched {
     int                 * hv_tensor_backend_ids; // [hash_set.size]
     struct ggml_tensor ** hv_tensor_copies;      // [hash_set.size][n_backends][n_copies]
 
+    // sparkinfer events map and executor
+    std::unique_ptr<std::unordered_map<std::string, ggml_backend_event_t>> spif_events;
+    std::unique_ptr<SingleThreadExecutor>                                  spif_executor;
+
     int * node_backend_ids; // [graph_size]
     int * leaf_backend_ids; // [graph_size]
 
@@ -1167,6 +1258,19 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
 
             // check if we should start a new split based on the sources of the current node
             bool need_new_split = false;
+
+            // sparkinfer force split
+            auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(node->extra);
+            if (spif_extra && spif_extra->async_split == SPIF_ASYNC_SPLIT_HEAD) {
+                need_new_split = true;
+            }
+            if (i > 0) {
+                auto * spif_extra_ = static_cast<sparkinfer_tensor_extra *>(graph->nodes[i - 1]->extra);
+                if (spif_extra_ && spif_extra_->async_split == SPIF_ASYNC_SPLIT_TAIL) {
+                    need_new_split = true;
+                }
+            }
+
             if (node_backend_id == cur_backend_id && split->n_inputs > 0) {
                 for (int j = 0; j < GGML_MAX_SRC; j++) {
                     struct ggml_tensor * src = node->src[j];
@@ -1413,6 +1517,55 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
     return true;
 }
 
+static inline bool enable_spif_parallel() {
+    static const bool k_enable_spif_parallel = (std::getenv("SPIF_PARALLEL") != nullptr);
+    return k_enable_spif_parallel;
+}
+
+static inline sparkinfer_tensor_extra * get_extra(ggml_tensor * tensor) {
+    if (!tensor->extra) {
+        tensor->extra = calloc(1, sizeof(sparkinfer_tensor_extra));
+    }
+    return static_cast<sparkinfer_tensor_extra *>(tensor->extra);
+}
+
+static inline void sparkinfer_append_event(ggml_tensor *               tensor,
+                                           enum sparkinfer_event_state state,
+                                           ggml_backend_event_t        event) {
+    auto * spif_extra = get_extra(tensor);
+    GGML_ASSERT(spif_extra->event_count < GGML_MAX_SRC);
+    spif_extra->states[spif_extra->event_count]   = state;
+    spif_extra->events[spif_extra->event_count++] = event;
+}
+
+void sparkinfer_set_node_flags(ggml_tensor * tensor, enum sparkinfer_node_state async_split) {
+    if (!enable_spif_parallel()) {
+        return;
+    }
+
+    auto * spif_extra       = get_extra(tensor);
+    spif_extra->async_split = async_split;
+}
+
+void sparkinfer_register_dependency(ggml_backend_sched_t        sched,
+                                    ggml_tensor *               src,
+                                    ggml_tensor *               dst,
+                                    ggml_backend_t              event_backend,
+                                    enum sparkinfer_event_state src_state,
+                                    enum sparkinfer_event_state dst_state) {
+    if (!enable_spif_parallel()) {
+        return;
+    }
+
+    const std::string event_key = std::string(src->name) + " + " + dst->name;
+    if (sched->spif_events->find(event_key) == sched->spif_events->end()) {
+        (*sched->spif_events)[event_key] = ggml_backend_event_new(event_backend->device);
+    }
+    ggml_backend_event_t event = (*sched->spif_events)[event_key];
+    sparkinfer_append_event(src, src_state, event);
+    sparkinfer_append_event(dst, dst_state, event);
+}
+
 static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     struct ggml_backend_sched_split * splits = sched->splits;
@@ -1420,11 +1573,35 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
     ggml_tensor * prev_ids_tensor = nullptr;
     std::vector<int32_t> ids;
     std::vector<ggml_bitset_t> used_ids;
+    std::future<enum ggml_status> fut;
 
     for (int split_id = 0; split_id < sched->n_splits; split_id++) {
         struct ggml_backend_sched_split * split = &splits[split_id];
         int split_backend_id = split->backend_id;
         ggml_backend_t split_backend = sched->backends[split_backend_id];
+
+        // wait for the async cuda kernel caller when use SPIF_PARALLEL in sparkinfer
+        if (fut.valid() && ggml_backend_dev_type(split_backend->device) != GGML_BACKEND_DEVICE_TYPE_CPU) {
+            enum ggml_status async_ec = fut.get();
+            if (async_ec != GGML_STATUS_SUCCESS) {
+                return async_ec;
+            }
+        }
+
+        // skip backend_cpu synchronize when use SPIF_PARALLEL in sparkinfer
+        bool skip_backend_sync = false;
+        if (ggml_backend_dev_type(split_backend->device) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+            for (int node_id = 0; node_id < split->graph.n_nodes; ++node_id) {
+                if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(split->graph.nodes[node_id]->extra); spif_extra) {
+                    for (int k = 0; k < spif_extra->event_count; ++k) {
+                        if (spif_extra->states[k] == SPIF_SYNCHRONIZE) {
+                            ggml_backend_event_synchronize(spif_extra->events[k]);
+                        }
+                    }
+                    skip_backend_sync = true;
+                }
+            }
+        }
 
         // copy the input tensors to the split backend
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
@@ -1440,6 +1617,9 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     ggml_backend_synchronize(split_backend);
                 }
                 ggml_backend_tensor_copy(input, input_cpy);
+            } else if (skip_backend_sync) {
+                ggml_backend_tensor_copy(input, input_cpy);
+                continue;
             } else {
                 // wait for the split backend to finish using the input before overwriting it
                 if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
@@ -1549,10 +1729,40 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
+        static const bool enable_split_debug = (getenv("SPIF_SPLIT_DEBUG") != nullptr);
+        if (enable_split_debug) {
+            printf("\n SPLIT %d: backend: %d %s # %d inputs\n", split_id, split_backend_id,
+                   ggml_backend_name(split_backend), split->n_inputs);
+            for (int input_id = 0; input_id < split->n_inputs; input_id++) {
+                struct ggml_tensor * input = split->inputs[input_id];
+                printf("  input %d: %s (%5.5s)\n", input_id, input->name,
+                       ggml_backend_name(sched->backends[tensor_backend_id(input)]));
+            }
+            for (int node_id = 0; node_id < split->graph.n_nodes; node_id++) {
+                struct ggml_tensor * node = split->graph.nodes[node_id];
+                printf("node %d (%s): %s {%ld, %ld} %s | ", node_id, ggml_op_name(node->op), node->name, node->ne[0],
+                       node->ne[1], ggml_type_name(node->type));
+                for (int k = 0; k < GGML_MAX_SRC; k++) {
+                    struct ggml_tensor * src = node->src[k];
+                    if (src == NULL) {
+                        continue;
+                    }
+                    printf("src %d: %s {%ld, %ld} %s, ", k, src->name, src->ne[0], src->ne[1], ggml_type_name(src->type));
+                }
+                printf("\n");
+            }
+        }
+
         if (!sched->callback_eval) {
-            enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
-            if (ec != GGML_STATUS_SUCCESS) {
-                return ec;
+            if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(split->graph.nodes[0]->extra);
+                spif_extra && spif_extra->async_split == SPIF_ASYNC_SPLIT_HEAD &&
+                ggml_backend_dev_type(sched->backends[splits[split_id + 1].backend_id]->device) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                fut = sched->spif_executor->submit(ggml_backend_graph_compute_async, split_backend, &split->graph);
+            } else {
+                enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
+                if (ec != GGML_STATUS_SUCCESS) {
+                    return ec;
+                }
             }
         } else {
             // similar to ggml_backend_compare_graph_backend
@@ -1616,6 +1826,10 @@ ggml_backend_sched_t ggml_backend_sched_new(
     sched->debug = GGML_SCHED_DEBUG ? atoi(GGML_SCHED_DEBUG) : 0;
     sched->n_backends = n_backends;
     sched->n_copies = parallel ? GGML_SCHED_MAX_COPIES : 1;
+    if (enable_spif_parallel()) {
+        sched->spif_events = std::make_unique<std::unordered_map<std::string, ggml_backend_event_t>>();
+        sched->spif_executor = std::make_unique<SingleThreadExecutor>();
+    }
 
     // initialize hash table
     // FIXME: needs to be size*2 to account for leafs (do it in graph_split instead)

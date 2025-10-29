@@ -333,6 +333,7 @@ struct common_params {
     std::string lookup_cache_static  = ""; // path of static ngram cache file for lookup decoding           // NOLINT
     std::string lookup_cache_dynamic = ""; // path of dynamic ngram cache file for lookup decoding          // NOLINT
     std::string logits_file          = ""; // file for saving *all* logits                                  // NOLINT
+    std::string spif_ms_path         = ""; // file path for sparkinfer model split                          // NOLINT
 
     std::vector<std::string> in_files;   // all input files
     std::vector<std::string> antiprompt; // strings upon which more user input is prompted (a.k.a. reverse prompts)
@@ -748,6 +749,17 @@ const char * const LLM_KV_SPLIT_NO            = "split.no";
 const char * const LLM_KV_SPLIT_COUNT         = "split.count";
 const char * const LLM_KV_SPLIT_TENSORS_COUNT = "split.tensors.count";
 
+}
+
+// only match the ffn weights (not including the bias) in sparkinfer
+const char * const LLM_FFN_REGEX = "\\.ffn_(up|down_t|gate)\\.weight";
+
+static std::string llm_ffn_ffn_block_regex(int idx) {
+    return string_format("blk\\.%d%s", idx, LLM_FFN_REGEX);
+}
+
+static llama_model_tensor_buft_override llm_ffn_cpu_override() {
+    return { LLM_FFN_REGEX, ggml_backend_cpu_buffer_type() };
 }
 
 //
