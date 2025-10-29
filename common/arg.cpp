@@ -1886,6 +1886,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"-spif-ms", "--sparkinfer-model-split"}, "FNAME",
+        "model split file path (required in sparkinfer)",
+        [](common_params & params, const std::string & value) {
+            params.spif_ms_path = value;
+        }
+    ).set_env("LLAMA_ARG_SP_MODEL_SPLIT"));
+    add_opt(common_arg(
+        {"--cpu-ffn", "-cffn"},
+        "keep all Feed Forward Network weights in the CPU",
+        [](common_params & params) {
+            params.tensor_buft_overrides.push_back(llm_ffn_cpu_override());
+        }
+    ).set_env("LLAMA_ARG_CPU_FFN"));
+    add_opt(common_arg(
         {"--cpu-moe", "-cmoe"},
         "keep all Mixture of Experts (MoE) weights in the CPU",
         [](common_params & params) {

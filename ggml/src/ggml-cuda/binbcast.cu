@@ -23,6 +23,14 @@ static __device__ __forceinline__ float op_div(const float a, const float b) {
     return a / b;
 }
 
+static __device__ __forceinline__ float op_xor(const float a, const float b) {
+    return __int2float_rz(__float2int_rz(a) ^ __float2int_rz(b));
+}
+
+static __device__ __forceinline__ float op_and(const float a, const float b) {
+    return __int2float_rz(__float2int_rz(a) & __float2int_rz(b));
+}
+
 template <float (*bin_op)(const float, const float),
           typename src0_t,
           typename src1_t,
@@ -406,6 +414,14 @@ void ggml_cuda_op_mul(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
 void ggml_cuda_op_div(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_div>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
+}
+
+void ggml_cuda_op_xor(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_xor>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
+}
+
+void ggml_cuda_op_and(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_and>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
 }
 
 template <float (*op)(const float, const float), int n_fuse>

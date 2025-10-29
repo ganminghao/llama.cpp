@@ -116,7 +116,8 @@ class ModelBase:
                  split_max_tensors: int = 0, split_max_size: int = 0, dry_run: bool = False,
                  small_first_shard: bool = False, hparams: dict[str, Any] | None = None, remote_hf_model_id: str | None = None,
                  disable_mistral_community_chat_template: bool = False,
-                 sentence_transformers_dense_modules: bool = False):
+                 sentence_transformers_dense_modules: bool = False,
+                 pred_path: Path | None = None, pred_bias: bool =False):
         if type(self) is ModelBase or \
                 type(self) is TextModel or \
                 type(self) is MmprojModel:
@@ -4362,6 +4363,92 @@ class Qwen3VLMoeTextModel(Qwen3MoeModel):
             return []
 
         return super().modify_tensors(data_torch, name, bid)
+
+
+class ReluMLP(torch.nn.Module):
+
+    def __init__(self, in_dim: int, lo_rank: int, out_dim: int, bias: bool):
+        super().__init__()
+        self.ffn_pred_up = torch.nn.Linear(in_dim, lo_rank, bias=bias)
+        self.relu = torch.nn.ReLU()
+        self.ffn_pred_down = torch.nn.Linear(lo_rank, out_dim, bias=bias)
+
+    @staticmethod
+    def load_from_file(model_file: Path, bias: bool):
+        state_dict = torch.load(model_file, map_location="cpu", weights_only=True)
+        replaced_state_dict = {
+            k.replace("fc1", "ffn_pred_up").replace("fc2", "ffn_pred_down"): v
+            for k, v in state_dict.items()
+        }
+
+        lo_rank, in_dim = replaced_state_dict["ffn_pred_up.weight"].shape
+        out_dim, _ = replaced_state_dict["ffn_pred_down.weight"].shape
+        model = ReluMLP(in_dim, lo_rank, out_dim, bias)
+        model.load_state_dict(replaced_state_dict, strict=False)
+        return model, lo_rank
+
+
+@ModelBase.register("ProSparseLLamaForCausalLM")
+class ProSparseLlamaModel(LlamaModel):
+    model_arch = gguf.MODEL_ARCH.PROSPARSE_LLAMA
+    undo_permute = True
+
+    def __init__(self, *args, pred_path: Path, pred_bias: bool, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pred_path = pred_path
+        self.pred_bias = pred_bias
+        self.pred_lora = []
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        # Collect model weight files like model_0.pt, model_1.pt, ... and sort by index
+        files = []
+        for f in os.listdir(self.pred_path):
+            m = re.fullmatch(r"model_(\d+)\.pt", f)
+            if m:
+                files.append((int(m.group(1)), f))
+        files.sort(key=lambda x: x[0])
+        files = [f for _, f in files]
+
+        # Load all predictor files, then yield them
+        all_pred_tensors = {}
+
+        for layer_idx, file_name in enumerate(files):
+            model, pred_lora = ReluMLP.load_from_file(
+                self.pred_path / file_name, self.pred_bias
+            )
+            self.pred_lora.append(pred_lora)
+            for name, data in model.state_dict().items():
+                all_pred_tensors[f"blk.{layer_idx}.{name}"] = data.float()
+            del model
+
+        for name, data in all_pred_tensors.items():
+            yield name, data
+
+        # Yield tensors from the parent class
+        yield from super().get_tensors()
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
+        # transpose ffn_down for neuron loading & AXPY
+        return [
+            (n, (t.T.contiguous() if "ffn_down_t" in n else t))
+            for n, t in super().modify_tensors(data_torch, name, bid)
+        ]
+
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        # force quant predictor's weights to 16-bits
+        if new_name.startswith("blk.") and "ffn_pred" in new_name:
+            return gguf.GGMLQuantizationType.BF16
+        return super().tensor_force_quant(name, new_name, bid, n_dims)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        self.gguf_writer.add_pred_lora(self.pred_lora)
+
+
+@ModelBase.register("BambooForCausalLM")
+class BambooModel(ProSparseLlamaModel):
+    model_arch = gguf.MODEL_ARCH.BAMBOO
+    # Bamboo uses the same architecture as ProSparseLlama
 
 
 @ModelBase.register("GPT2LMHeadModel")
@@ -10142,6 +10229,14 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
     )
     parser.add_argument(
+        "--pred-path", type=Path, default=None,
+        help="directory containing predictors file",
+    )
+    parser.add_argument(
+        "--pred-bias", action="store_true",
+        help="whether predictors have bias",
+    )
+    parser.add_argument(
         "--use-temp-file", action="store_true",
         help="use the tempfile library while processing (helpful when running out of memory, process killed)",
     )
@@ -10287,6 +10382,11 @@ def main() -> None:
         logger.error(f'Error: {dir_model} is not a directory')
         sys.exit(1)
 
+    pred_path = Path(args.pred_path) if args.pred_path else None
+    if pred_path and not pred_path.is_dir():
+        logger.error(f'Error: {pred_path} is not a directory')
+        sys.exit(1)
+
     ftype_map: dict[str, gguf.LlamaFileType] = {
         "f32": gguf.LlamaFileType.ALL_F32,
         "f16": gguf.LlamaFileType.MOSTLY_F16,
@@ -10343,8 +10443,8 @@ def main() -> None:
                                      split_max_size=split_str_to_n_bytes(args.split_max_size), dry_run=args.dry_run,
                                      small_first_shard=args.no_tensor_first_split,
                                      remote_hf_model_id=hf_repo_id, disable_mistral_community_chat_template=disable_mistral_community_chat_template,
-                                     sentence_transformers_dense_modules=args.sentence_transformers_dense_modules
-                                     )
+                                     sentence_transformers_dense_modules=args.sentence_transformers_dense_modules,
+                                     pred_path=pred_path, pred_bias=args.pred_bias)
 
         if args.vocab_only:
             logger.info("Exporting model vocab...")
@@ -10358,4 +10458,12 @@ def main() -> None:
 
 
 if __name__ == '__main__':
+    '''
+    Example usage:
+        python convert_hf_to_gguf.py /share/models/prosparse-llama-2-7b \
+            --pred-path /share/models/lay-back-predictors/prosparse-llama-2-7b \
+            --pred-bias \
+            --outtype bf16 \
+            --outfile /share/models/prosparse-7b-gguf-w-our-predictor/prosparse-7b.gguf
+    '''
     main()
