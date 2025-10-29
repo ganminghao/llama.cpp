@@ -6,6 +6,10 @@ llm_build_llama::llm_build_llama(const llama_model & model, const llm_graph_para
     GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
     GGML_ASSERT(n_embd_head == hparams.n_rot);
 
+    if (model.use_sparkinfer) {
+        GGML_ASSERT(params.spif_cm != nullptr && "spif_cm must be provided when using sparkinfer");
+    }
+
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
@@ -100,13 +104,17 @@ llm_build_llama::llm_build_llama(const llama_model & model, const llm_graph_para
                     LLM_NORM_RMS, il);
             cb(cur, "ffn_norm", il);
 
-            cur = build_ffn(cur,
-                    model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   NULL,
-                    model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
-                    model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                    NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
-            cb(cur, "ffn_out", il);
+            if (model.use_sparkinfer) {
+                cur = build_sparse_ffn(cur, inp_out_ids, &model, il);
+            } else {
+                cur = build_ffn(cur,
+                        model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   NULL,
+                        model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
+                        model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
+                        NULL,
+                        LLM_FFN_SILU, LLM_FFN_PAR, il);
+                cb(cur, "ffn_out", il);
+            }
         } else {
             // MoE branch
             cur = build_norm(ffn_inp,

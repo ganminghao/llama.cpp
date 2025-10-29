@@ -104,6 +104,7 @@ class Keys:
         VOCAB_SIZE                        = "{arch}.vocab_size"
         CONTEXT_LENGTH                    = "{arch}.context_length"
         EMBEDDING_LENGTH                  = "{arch}.embedding_length"
+        PRED_LORA                         = "{arch}.pred_lora"
         FEATURES_LENGTH                   = "{arch}.features_length"
         BLOCK_COUNT                       = "{arch}.block_count"
         LEADING_DENSE_BLOCK_COUNT         = "{arch}.leading_dense_block_count"
@@ -340,6 +341,8 @@ class GGUFType:
 class MODEL_ARCH(IntEnum):
     MMPROJ           = auto() # dummy arch for clip.cpp
     LLAMA            = auto()
+    PROSPARSE_LLAMA  = auto()
+    BAMBOO           = auto()
     LLAMA4           = auto()
     DECI             = auto()
     FALCON           = auto()
@@ -486,6 +489,8 @@ class MODEL_TENSOR(IntEnum):
     FFN_NORM             = auto()
     FFN_PRE_NORM         = auto()
     FFN_POST_NORM        = auto()
+    PRED_UP              = auto()
+    PRED_DOWN            = auto()
     FFN_GATE             = auto()
     FFN_DOWN             = auto()
     FFN_UP               = auto()
@@ -711,6 +716,8 @@ class MODEL_TENSOR(IntEnum):
 MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.MMPROJ:           "clip", # dummy arch for clip.cpp
     MODEL_ARCH.LLAMA:            "llama",
+    MODEL_ARCH.PROSPARSE_LLAMA:  "prosparse-llama",
+    MODEL_ARCH.BAMBOO:           "bamboo",
     MODEL_ARCH.LLAMA4:           "llama4",
     MODEL_ARCH.DECI:             "deci",
     MODEL_ARCH.FALCON:           "falcon",
@@ -857,8 +864,10 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.FFN_NORM:                  "blk.{bid}.ffn_norm",
     MODEL_TENSOR.FFN_PRE_NORM:              "blk.{bid}.ffn_norm",
     MODEL_TENSOR.FFN_POST_NORM:             "blk.{bid}.post_ffw_norm",
+    MODEL_TENSOR.PRED_UP:                   "blk.{bid}.ffn_pred_up",
+    MODEL_TENSOR.PRED_DOWN:                 "blk.{bid}.ffn_pred_down",
     MODEL_TENSOR.FFN_GATE:                  "blk.{bid}.ffn_gate",
-    MODEL_TENSOR.FFN_DOWN:                  "blk.{bid}.ffn_down",
+    MODEL_TENSOR.FFN_DOWN:                  "blk.{bid}.ffn_down_t",
     MODEL_TENSOR.FFN_UP:                    "blk.{bid}.ffn_up",
     MODEL_TENSOR.FFN_GATE_SHEXP:            "blk.{bid}.ffn_gate_shexp",
     MODEL_TENSOR.FFN_DOWN_SHEXP:            "blk.{bid}.ffn_down_shexp",
@@ -1166,6 +1175,44 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_GATE_EXP,
         MODEL_TENSOR.FFN_DOWN_EXP,
         MODEL_TENSOR.FFN_UP_EXP,
+    ],
+    MODEL_ARCH.PROSPARSE_LLAMA: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.ATTN_ROT_EMBD,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.PRED_UP,
+        MODEL_TENSOR.PRED_DOWN,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+    ],
+    MODEL_ARCH.BAMBOO: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.ATTN_ROT_EMBD,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.PRED_UP,
+        MODEL_TENSOR.PRED_DOWN,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
     ],
     MODEL_ARCH.LLAMA4: [
         MODEL_TENSOR.TOKEN_EMBD,
@@ -3047,6 +3094,14 @@ MODEL_TENSOR_SKIP: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.ROPE_FREQS,
         MODEL_TENSOR.ATTN_ROT_EMBD,
     ],
+    MODEL_ARCH.PROSPARSE_LLAMA: [
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_ROT_EMBD,
+    ],
+    MODEL_ARCH.BAMBOO: [
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_ROT_EMBD,
+    ],
     MODEL_ARCH.DECI: [
         MODEL_TENSOR.ROPE_FREQS,
         MODEL_TENSOR.ATTN_ROT_EMBD,
@@ -3333,6 +3388,7 @@ KEY_BLOCK_COUNT           = Keys.LLM.BLOCK_COUNT
 KEY_FEED_FORWARD_LENGTH   = Keys.LLM.FEED_FORWARD_LENGTH
 KEY_USE_PARALLEL_RESIDUAL = Keys.LLM.USE_PARALLEL_RESIDUAL
 KEY_TENSOR_DATA_LAYOUT    = Keys.LLM.TENSOR_DATA_LAYOUT
+KEY_PRED_LORA             = Keys.LLM.PRED_LORA
 
 # attention
 KEY_ATTENTION_HEAD_COUNT        = Keys.Attention.HEAD_COUNT

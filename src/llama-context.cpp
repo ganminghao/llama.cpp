@@ -154,6 +154,10 @@ llama_context::llama_context(
                 __func__, cparams.n_ctx_seq, hparams.n_ctx_train);
     }
 
+    if (!hparams.vocab_only && model.use_sparkinfer){
+        spif_cm = model.spif_cm;
+    }
+
     if (!hparams.vocab_only) {
         // GPU backends
         for (auto * dev : model.devices) {
@@ -1452,6 +1456,7 @@ llm_graph_params llama_context::graph_params(
         /*.gtype       =*/ gtype,
         /*.sched       =*/ sched.get(),
         /*.backend_cpu =*/ backend_cpu,
+        /*.backend_gpu =*/ backends[0].get(),
         /*.cvec        =*/ &cvec,
         /*.loras       =*/ &loras,
         /*.mctx        =*/ mctx,
@@ -1459,6 +1464,7 @@ llm_graph_params llama_context::graph_params(
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
         /*.res         =*/ res,
+        /*.spif_cm     =*/ spif_cm,
     };
 }
 

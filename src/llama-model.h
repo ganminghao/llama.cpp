@@ -17,6 +17,8 @@ struct llama_cparams;
 struct llama_ubatch;
 struct llama_model_loader;
 
+struct sparkinfer_cache_manager;
+
 // available models
 enum llm_type {
     LLM_TYPE_UNKNOWN,
@@ -258,9 +260,16 @@ struct llama_layer {
     struct ggml_tensor * ffn_norm_exps    = nullptr;
     struct ggml_tensor * ffn_norm_enc     = nullptr;
 
+    // predictor
+    struct ggml_tensor * ffn_pred_up     = nullptr;
+    struct ggml_tensor * ffn_pred_down   = nullptr;
+    struct ggml_tensor * ffn_pred_up_b   = nullptr;
+    struct ggml_tensor * ffn_pred_down_b = nullptr;
+
     // ff
     struct ggml_tensor * ffn_gate     = nullptr; // w1
     struct ggml_tensor * ffn_down     = nullptr; // w2
+    struct ggml_tensor * ffn_down_t   = nullptr; // w2.T needed by sparkinfer
     struct ggml_tensor * ffn_up       = nullptr; // w3
     struct ggml_tensor * ffn_gate_enc = nullptr;
     struct ggml_tensor * ffn_down_enc = nullptr;
@@ -417,6 +426,10 @@ struct llama_model {
 
     llama_hparams hparams = {};
     llama_vocab   vocab;
+
+    // sparkinfer
+    struct sparkinfer_cache_manager * spif_cm        = nullptr;
+    bool                              use_sparkinfer = false;
 
     // for classifier models
     std::vector<std::string> classifier_labels;
