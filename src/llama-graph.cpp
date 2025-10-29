@@ -4,11 +4,14 @@
 #include "llama-batch.h"
 #include "llama-cparams.h"
 #include "llama-model.h"
+#include "llama-model.h"
 
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
+
+#include "llama-sparkinfer.h"
 
 #include "llama-sparkinfer.h"
 

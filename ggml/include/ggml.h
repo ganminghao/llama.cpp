@@ -498,7 +498,6 @@ extern "C" {
         GGML_OP_AXPY_SPARSE,
         GGML_OP_RELOAD_EXEC,
         GGML_OP_OUT_PROD,
-
         GGML_OP_SCALE,
         GGML_OP_SET,
         GGML_OP_CPY,
