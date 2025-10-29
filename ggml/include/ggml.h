@@ -468,6 +468,8 @@ extern "C" {
         GGML_OP_SUB,
         GGML_OP_MUL,
         GGML_OP_DIV,
+        GGML_OP_XOR,
+        GGML_OP_AND,
         GGML_OP_SQR,
         GGML_OP_SQRT,
         GGML_OP_LOG,
@@ -475,6 +477,7 @@ extern "C" {
         GGML_OP_COS,
         GGML_OP_SUM,
         GGML_OP_SUM_ROWS,
+        GGML_OP_SUM_COLS,
         GGML_OP_CUMSUM,
         GGML_OP_MEAN,
         GGML_OP_ARGMAX,
@@ -491,6 +494,9 @@ extern "C" {
 
         GGML_OP_MUL_MAT,
         GGML_OP_MUL_MAT_ID,
+        GGML_OP_MUL_MAT_SPARSE,
+        GGML_OP_AXPY_SPARSE,
+        GGML_OP_RELOAD_EXEC,
         GGML_OP_OUT_PROD,
 
         GGML_OP_SCALE,
@@ -532,6 +538,7 @@ extern "C" {
         GGML_OP_ARGSORT,
         GGML_OP_TOP_K,
         GGML_OP_LEAKY_RELU,
+        GGML_OP_FATRELU,
         GGML_OP_TRI,
         GGML_OP_FILL,
 
@@ -947,6 +954,16 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
 
+    GGML_API struct ggml_tensor * ggml_xor(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b);
+
+    GGML_API struct ggml_tensor * ggml_and(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b);
+
     GGML_API struct ggml_tensor * ggml_sqr(
             struct ggml_context * ctx,
             struct ggml_tensor  * a);
@@ -1010,6 +1027,11 @@ extern "C" {
 
     // sums along rows, with input shape [a,b,c,d] return shape [1,b,c,d]
     GGML_API struct ggml_tensor * ggml_sum_rows(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a);
+
+    // sums along cols, with input shape [a,b,c,d] return shape [a,1,c,d]
+    GGML_API struct ggml_tensor * ggml_sum_cols(
             struct ggml_context * ctx,
             struct ggml_tensor  * a);
 
@@ -1118,6 +1140,10 @@ extern "C" {
     GGML_API struct ggml_tensor * ggml_leaky_relu(
             struct ggml_context * ctx,
             struct ggml_tensor  * a, float negative_slope, bool inplace);
+
+    GGML_API struct ggml_tensor * ggml_fatrelu(
+            struct ggml_context * ctx,
+            struct ggml_tensor * a, float threshold, bool inplace);
 
     GGML_API struct ggml_tensor * ggml_relu_inplace(
             struct ggml_context * ctx,
@@ -1394,6 +1420,20 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
+
+    GGML_API struct ggml_tensor * ggml_mul_mat_sparse(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            struct ggml_tensor  * sparse_idx,
+            struct ggml_tensor  * neu_info);
+
+    GGML_API struct ggml_tensor * ggml_axpy_sparse(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            struct ggml_tensor  * sparse_idx,
+            struct ggml_tensor  * neu_info);
 
     // change the precision of a matrix multiplication
     // set to GGML_PREC_F32 for higher precision (useful for phi-2)

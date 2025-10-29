@@ -391,6 +391,13 @@ class TensorNameMap:
             "model.layers.{bid}.block_sparse_moe.e_score_correction",       # minimax-m2
         ),
 
+        MODEL_TENSOR.PRED_UP: (
+            "model.layers.{bid}.pred_up",
+        ),
+        MODEL_TENSOR.PRED_DOWN: (
+            "model.layers.{bid}.pred_down",
+        ),
+
         # Feed-forward up
         MODEL_TENSOR.FFN_UP: (
             "gpt_neox.layers.{bid}.mlp.dense_h_to_4h",                # gptneox
