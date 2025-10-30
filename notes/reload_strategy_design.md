@@ -8,7 +8,7 @@
 
 - 修改 `GGML_MAX_SRC = 20`，合并为一个算子，但是仍然调用三个函数：
 
-1. `sparkinfer_reload_plan()` <-- Reload 策略变更时，只有这个函数需要被修改！
+1. `sparkinfer_reload_plan()` **<-- Reload 策略变更时，只有这个函数需要被修改！**
 2. `sparkinfer_reload_evict()`
 3. `sparkinfer_reload_exec()`
 

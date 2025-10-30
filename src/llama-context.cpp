@@ -261,6 +261,8 @@ llama_context::llama_context(
     }
 
     if (!hparams.vocab_only && llama_use_sparkinfer(&model)) {
+        // [YPX] [Q] 为什么 spif_cache 存储在 model 里面？
+        // [YPX] [Todo] 这里要引用 sparkInfer_cache_manager 的初始化逻辑。
         spif_cache = model.spif_cache; // GTODO: use unique_ptr??
     }
 

@@ -4,14 +4,11 @@
 #include "ggml.h" 
 
 struct reload_plan_result {
-    int * slot_to_evict;
-    int * slot_to_load;
-    size_t n_reload;
-
-    reload_plan_result() : slot_to_evict(nullptr), slot_to_load(nullptr), n_reload(0) {}
+    std::vector<int> groups_to_reload;
+    std::vector<int> slots_for_evict;
 };
 typedef struct reload_plan_result reload_plan_result;
-  
+
 #ifdef __cplusplus  
 extern "C" {  
 #endif  

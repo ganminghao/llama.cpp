@@ -1,5 +1,7 @@
 # Reload 算子设计
 
+> 本文已经过时，最新的算子设计请移步 [reload 设计文档](reload-design.md)
+
 > 关于 sparkinfer_cache_manager 的设计思路，请移步 [sparkinfer_cache_manager 设计文档](sparkinfer_cache_manager_design.md)
 
 YPX 的个人注释风格解释：

@@ -9,6 +9,7 @@ sparkInfer_layer_cache::~sparkInfer_layer_cache() {
     }
 }
 
+// [YPX] [C] Init function is replaced by the constructor, which has not been merged yet.
 bool sparkInfer_layer_cache:: init(int layer_idx, llama_model& model, llama_layer& layer, ggml_backend_t backend, const std::vector<int64_t>& initial_gpu_neu_idx) {
     bool has_gate = true; // GTODO: gate diverage
     bool full_gpu = layer.gpu_offload_ratio >= 1;
@@ -23,11 +24,11 @@ bool sparkInfer_layer_cache:: init(int layer_idx, llama_model& model, llama_laye
     cpu_ffn_down_t          = layer.ffn_down_t;
 
     // mappings
-    ffn_gpu_neu_idx         = layer.ffn_gpu_neu_idx;
-    ffn_gpu_neu_mask        = layer.ffn_gpu_neu_mask;
-    ffn_gpu_group_idx       = layer.ffn_gpu_group_idx;
-    ffn_gpu_group_mask      = layer.ffn_gpu_group_mask;
-    ffn_neuron_to_group_map = layer.ffn_neuron_to_group_map;
+    ffn_gpu_neu_idx             = layer.ffn_gpu_neu_idx;
+    ffn_gpu_neu_mask            = layer.ffn_gpu_neu_mask;
+    ffn_gpu_group_idx           = layer.ffn_gpu_group_idx;
+    ffn_gpu_group_mask          = layer.ffn_gpu_group_mask;
+    ffn_neuron_to_group_map     = layer.ffn_neuron_to_group_map;
     
     // metadata
     layer_neuron_count      = model.layer_neuron_count; // 每层神经元总数
@@ -180,82 +181,165 @@ bool sparkInfer_layer_cache:: init(int layer_idx, llama_model& model, llama_laye
     return true;
 }
 
-int64_t sparkInfer_layer_cache:: ensure_neuron_on_gpu(int64_t neuron_idx) {
-    auto it = neuron_to_slot_map.find(neuron_idx);
-    if (it != neuron_to_slot_map.end()) {
-        // Cache Hit: 神经元已在GPU上，更新其为最近使用
-        int64_t slot_idx = it->second;
-        lru_tracker.erase(lru_map[neuron_idx]);
-        lru_tracker.push_front(neuron_idx);
-        lru_map[neuron_idx] = lru_tracker.begin();
-        return slot_idx;
-    }
+// Sparkinfer reload (graph building)
+ggml_tensor * sparkInfer_layer_cache::build_reload_plan(ggml_context * ctx, ggml_tensor * sparse_idx, const int il){
+    // [YPX] [Todo] Implementation
+    return nullptr;
+}
 
-    // Cache Miss: 需要换入
-    int64_t slot_to_use = -1;
-    if (neuron_to_slot_map.size() < neuron_cache_capacity) {
-        // 缓存未满，找到一个空槽位
-        for(int64_t i = 0; i < (int64_t)slot_to_neuron_map.size(); ++i) {
-            if (slot_to_neuron_map[i] == -1) {
-                slot_to_use = i;
-                break;
+ggml_tensor * sparkInfer_layer_cache::build_reload_exec(ggml_context * ctx, ggml_tensor * sparse_idx, const char * name, const int il){
+    // [YPX] [Todo] Implementation
+    return nullptr;
+}
+
+// [YPX] [Q] Maybe these two functions are already implemented with names given by me?
+bool sparkInfer_layer_cache::spif_reload_plan(ggml_tensor * tensor){
+    // [YPX] [Todo] Implementation
+    return true;
+}
+
+bool sparkInfer_layer_cache::spif_reload_exec(ggml_tensor * tensor){
+    // [YPX] [Todo] Implementation
+    return true;
+}
+
+// --- Reload Plan Implementation ---
+/**
+ * @brief [Plan Step 1] 统计激活的神经元数量。
+ * @return std::vector<int> group_activated_neuron_count 每个组激活的神经元数量。
+ */
+std::vector<int> sparkInfer_layer_cache::_spif_reload_plan_count_activated_neurons(){
+    std::vector<int> group_activated_neuron_count(this->layer_group_count, 0);
+    const int* p_sparse_idx = (const int*)this->sparse_idx->data;
+
+    for (int neuron_idx = 0; neuron_idx < this->layer_neuron_count; ++neuron_idx) {
+        if (p_sparse_idx[neuron_idx]) { // 1 = activated
+            int group_idx = neuron_idx / this->layer_group_size;
+            if (group_idx < this->layer_group_count) { // 安全检查
+                group_activated_neuron_count[group_idx]++;
             }
         }
+    }
+    return group_activated_neuron_count;
+}
+
+/**
+ * @brief [Plan Step 2] 根据 DFR (或 LRU 等) 策略，计算出应在 GPU 上的 Top-K 组。
+ * @param group_activated_neuron_count Step 1 的结果。
+ * @return std::vector<int> groups_to_ensure 应该确保在 GPU 上的组列表。
+ */
+std::vector<int> sparkInfer_layer_cache::_spif_reload_plan_get_groups_to_ensure(const std::vector<int>& group_activated_neuron_count){
+    // 使用 constexpr if 达到编译时分派
+    if constexpr (SPARKINFER_RELOAD_STRATEGY == sparkinfer_reload_strategy::USE_DFR) {
+        return _spif_reload_plan_use_dfr(group_activated_neuron_count);
+    } else if constexpr (SPARKINFER_RELOAD_STRATEGY == sparkinfer_reload_strategy::USE_LRU) {
+        // _spif_reload_plan_use_lru(group_activated_neuron_count); // 调用 LRU 实现
+        GGML_LOG_ERROR("%s: [Error] LRU strategy not implemented yet.\n", __func__); 
     } else {
-        // 缓存已满，根据LRU策略选择牺牲品
-        int64_t victim_neuron_idx = lru_tracker.back();
-        lru_tracker.pop_back();
+        GGML_LOG_WARN("%s: [Warning] Unknown Reload Strategy, fall back to DFR\n", __func__);
+        return _spif_reload_plan_use_dfr(group_activated_neuron_count); // 默认使用 DFR
+    }
+}
+
+/**
+ * @brief [Plan Step 2.1] DFR 策略的具体实现。
+ */
+std::vector<int> sparkInfer_layer_cache::_spif_reload_plan_use_dfr(const std::vector<int>& group_activated_neuron_count) {
+    typedef std::pair<float, int> ScoreGroupPair;
+    std::priority_queue<ScoreGroupPair, std::vector<ScoreGroupPair>, std::greater<ScoreGroupPair>> min_heap;
+
+    for (int group_id = 0; group_id < this->layer_group_count; ++group_id) {
+        //  dfr_score = dfr_score * decay + is_activated * (1 - decay)
+        float is_activated = (group_activated_neuron_count[group_id] > 0) ? 1.0f : 0.0f;
+        float old_score = this->dfr_scores[group_id];
+        float new_score = old_score * this->dfr_decay_rate + is_activated * (1.0f - this->dfr_decay_rate);
         
-        slot_to_use = neuron_to_slot_map[victim_neuron_idx];
-        
-        neuron_to_slot_map.erase(victim_neuron_idx);
-        lru_map.erase(victim_neuron_idx);
+        this->dfr_scores[group_id] = new_score; // 持久化更新 DFR 分数
+
+        // 维护 Top-K 最小堆
+        if (min_heap.size() < (size_t)this->layer_group_capacity) {
+            min_heap.push({new_score, group_id});
+        } else if (new_score > min_heap.top().first) {
+            min_heap.pop();
+            min_heap.push({new_score, group_id});
+        }
     }
 
-    GGML_ASSERT(slot_to_use != -1);
-
-    // 执行拷贝并将新神经元信息写入元数据
-    copy_neuron_to_gpu_slot(neuron_idx, slot_to_use);
-    update_mappings(neuron_idx, slot_to_use);
-    
-    return slot_to_use;
-}   
-
-void sparkInfer_layer_cache:: copy_neuron_to_gpu_slot(int64_t neuron_idx, int64_t slot_idx) {
-    // 创建一个临时的上下文用于视图操作
-    struct ggml_init_params params = { ggml_tensor_overhead() * 6, NULL, true };
-    struct ggml_context* view_ctx = ggml_init(params);
-
-
-    auto copy_row = [&](ggml_tensor* cpu_src, ggml_tensor* gpu_dst_cache) {
-        const int64_t row_len = cpu_src->ne[0];
-        const size_t  row_bytes = ggml_row_size(cpu_src->type, row_len);
-
-        // 创建指向CPU源矩阵中特定行的视图
-        struct ggml_tensor* src_view = ggml_view_1d(view_ctx, cpu_src, row_len, neuron_idx * cpu_src->nb[1]);
-        src_view->buffer = cpu_src->buffer;
-
-        // 创建指向GPU缓存中特定槽位的视图
-        struct ggml_tensor* dst_view = ggml_view_1d(view_ctx, gpu_dst_cache, row_len, slot_idx * gpu_dst_cache->nb[1]);
-        dst_view->buffer = gpu_dst_cache->buffer;
-
-        // 使用后端进行异步拷贝
-        ggml_backend_tensor_copy(src_view, dst_view);
-    };
-
-    copy_row(cpu_ffn_gate, gpu_ffn_gate_cache);
-    copy_row(cpu_ffn_up,   gpu_ffn_up_cache);
-    copy_row(cpu_ffn_down_t, gpu_ffn_down_t_cache);
-    
-    ggml_free(view_ctx);
+    // 从堆中提取 Top-K 组 (groups_to_ensure)
+    std::vector<int> groups_to_ensure;
+    groups_to_ensure.reserve(this->layer_group_capacity);
+    while (!min_heap.empty()) {
+        groups_to_ensure.push_back(min_heap.top().second); // .second 是 group_id
+        min_heap.pop();
+    }
+    return groups_to_ensure;
 }
 
-void sparkInfer_layer_cache:: update_mappings(int64_t neuron_idx, int64_t slot_idx) {
-    neuron_to_slot_map[neuron_idx] = slot_idx;
-    slot_to_neuron_map[slot_idx] = neuron_idx;
+/**
+ * @brief [Plan Step 3] 计算差集并更新状态。
+ * @param groups_to_ensure Step 2 的结果。
+ * @return reload_plan_result 包含 plan_result.groups_to_reload 和 plan_result.slots_for_evict。
+ */
+const reload_plan_result & sparkInfer_layer_cache::_spif_reload_plan_compute_diff_and_update_state(const std::vector<int>& groups_to_ensure) {
+    // Clear previous plan results
+    this->plan_result.groups_to_reload.clear();
+    this->plan_result.slots_for_evict.clear();
+
+    // 1. O(k) 建立目标组的哈希集合
+    std::unordered_set<int> target_groups(groups_to_ensure.begin(), groups_to_ensure.end());
+
+    // 2. O(k) 遍历当前 GPU 上的组 (group_to_slot_hash)
+    //    找出 Hit (保留), Miss (需驱逐)
+    std::vector<int> groups_to_evict;
+    
+    for (auto it = this->group_to_slot_hash.begin(); it != this->group_to_slot_hash.end(); /* no increment */) {
+        int group_in_gpu = it->first;
+        int slot_id      = it->second;
+
+        if (target_groups.find(group_in_gpu) == target_groups.end()) {
+            // Miss: 在 GPU, 但不在 Target -> 驱逐
+            groups_to_evict.push_back(group_in_gpu);
+            this->plan_result.slots_for_evict.push_back(slot_id);
+            
+            // 更新状态: 从哈希表中移除
+            it = this->group_to_slot_hash.erase(it);
+        } else {
+            // Hit: 在 GPU, 也在 Target -> 保留
+            it++;
+        }
+    }
+
+    // 3. O(k) 遍历目标组, 找出需要新加载的组
+    for (const int group_id : target_groups) {
+        if (this->group_to_slot_hash.find(group_id) == this->group_to_slot_hash.end()) {
+            // 在 Target, 但不在 GPU (哈希表) -> 加载
+            this->plan_result.groups_to_reload.push_back(group_id);
+        }
+    }
+
+    // 4. 关键断言：空出的槽位必须等于需要加载的组
+    GGML_ASSERT(this->plan_result.slots_for_evict.size() == this->plan_result.groups_to_reload.size());
+
+    // 5. 更新状态: 将新加载的组“放回”哈希表，复用空闲 slot
+    for (size_t i = 0; i < this->plan_result.groups_to_reload.size(); ++i) {
+        int group_to_load = this->plan_result.groups_to_reload[i];
+        int slot_to_use   = this->plan_result.slots_for_evict[i]; // 复用被驱逐的 slot
+        
+        this->group_to_slot_hash[group_to_load] = slot_to_use;
+    }
+
+    return this->plan_result;
 }
 
+// --- sparkInfer_cache_manager Implementation ---
 
+sparkInfer_cache_manager::~sparkInfer_cache_manager() {
+    for (auto layer_cache : layer_caches) {
+        if (layer_cache) {
+            delete layer_cache;
+        }
+    }
+}
 
 bool sparkInfer_cache_manager:: init(llama_model &p_model, ggml_backend_t gpu_backend) {
     this->model = &p_model;
@@ -312,8 +396,9 @@ bool sparkInfer_cache_manager:: init(llama_model &p_model, ggml_backend_t gpu_ba
     return true;
 }
 
+/*
 void sparkInfer_cache_manager:: prepare_hot_neurons(int layer_idx, const std::vector<int64_t>& required_neuron_indices, std::vector<int64_t>& out_gpu_slot_indices) {
-    if (layer_caches[layer_idx]->neuron_cache_capacity == 0) return;
+    if (layer_caches[layer_idx]->layer_neuron_capacity == 0) return;
 
     out_gpu_slot_indices.resize(required_neuron_indices.size());
     for (size_t i = 0; i < required_neuron_indices.size(); ++i) {
@@ -325,7 +410,7 @@ void sparkInfer_cache_manager:: prepare_hot_neurons(int layer_idx, const std::ve
     // struct ggml_tensor* graph_neu_idx = model->layers[layer_idx].ffn_gpu_neu_idx;
     // ggml_backend_tensor_set(graph_neu_idx, out_gpu_slot_indices.data(), 0, sizeof(int32_t) * out_gpu_slot_indices.size());
 }
-
+*/
 
 
 sparkinfer_split_loader:: sparkinfer_split_loader(const std::string & fname) : fname(fname) {
@@ -744,13 +829,13 @@ ggml_tensor * sparkInfer_layer_cache:: build_reload_exec(ggml_context * ctx, ggm
 extern "C" {  
     bool ggml_spif_reload_plan(ggml_spif_context* ctx, ggml_tensor * tensor) {  
         sparkInfer_layer_cache * spif_cache = reinterpret_cast<sparkInfer_layer_cache*>(ctx);  
-        return spif_cache->spif_reload_plan(tensor);  
+        return spif_cache->spif_reload_plan(tensor);
     }
 
     bool ggml_spif_reload_exec(ggml_spif_context* ctx, ggml_tensor * tensor) {  
         sparkInfer_layer_cache * spif_cache = reinterpret_cast<sparkInfer_layer_cache*>(ctx);  
-        return spif_cache->spif_reload_exec(tensor);  
-    }  
+        return spif_cache->spif_reload_exec(tensor);
+    }
 }
 
 // Sparkinfer reload plan (算子 1 + 2)
