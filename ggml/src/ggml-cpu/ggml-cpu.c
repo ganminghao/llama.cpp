@@ -2327,164 +2327,7 @@ static void ggml_axpy_avx_f16_alphaf32(const int n, const ggml_fp16_t * restrict
 #endif
 }
 
-static void ggml_compute_forward_axpy_sparse_one_chunk(
-        const struct ggml_compute_params * params,
-              struct ggml_tensor * dst,
-              enum ggml_type type,
-              int64_t start_neu,
-              int64_t end_neu) 
-{
-    const struct ggml_tensor * src0 = dst->src[0];
-    const struct ggml_tensor * src1 = dst->src[1];  // input
-    const struct ggml_tensor * mask = dst->src[3];  // mask: same shape as x
-
-    GGML_TENSOR_BINARY_OP_LOCALS
-
-    enum ggml_type const vec_dot_type = type_traits_cpu[type].vec_dot_type;
-
-    const int64_t        n_tokens = ne1;
-    const int64_t    neu_len_char = nb01;
-    const int64_t  token_len_char = nb11;
-
-    const int ith = params->ith;
-    const int nth = params->nth;
-
-    // printf("ith %d, start: %lld, end: %lld\n", ith, start_neu, end_neu);
-
-    const void * input = (src1->type == vec_dot_type) ? src1->data : params->wdata;
-    const size_t row_size = ggml_row_size(vec_dot_type, ne10);
-
-    char * weight_char = (char *)src0->data;
-    char *  token_char = (char *)input;
-    int64_t * cpu_mask = (int64_t *)mask->data;
-
-    for(int neu = start_neu; neu < end_neu; neu++){
-        ggml_fp16_t * weight_row = (char*)(weight_char + neu_len_char * neu);
-        if(cpu_mask[neu] == 1){
-            continue;
-        }
-        float vy[ne00];
-        for(int token_id = 0; token_id < n_tokens; token_id++){
-            memset(vy, 0, ne00*sizeof(float));
-
-            ggml_fp16_t * token = (char *)(token_char + token_id * token_len_char);
-            ggml_fp16_t alpha_fp16 = token[neu];
-            float alpha = GGML_FP16_TO_FP32(alpha_fp16);
-
-            if(fabsf(alpha) < 1e-9f){
-                continue;
-            }
-            ggml_axpy_avx_f16(ne00, weight_row, vy, alpha_fp16);
-            float * dst_row = (float *)((char *)dst->data + nb1 * token_id);
-            
-            for(int i = 0; i < ne00; i++){
-#pragma omp atomic
-                dst_row[i] += vy[i];
-            }
-        }
-    }
-}
-
-
-static void ggml_compute_forward_axpy_sparse(
-        const struct ggml_compute_params * params,
-              struct ggml_tensor * dst) 
-{
-
-    const struct ggml_tensor * src0 = dst->src[0];  // x
-    const struct ggml_tensor * src1 = dst->src[1];  // input
-    const struct ggml_tensor * idx  = dst->src[2];  // sparse idx
-    const struct ggml_tensor * mask = dst->src[3];  // mask
-
-    GGML_ASSERT(mask && "mask is missing");
-    GGML_ASSERT(mask->data && "mask->data is missing");
-
-    GGML_TENSOR_BINARY_OP_LOCALS;
-
-    const int ith = params->ith;
-    const int nth = params->nth;
-
-    // zero the dst buffer once
-    if (ith == 0) {
-        memset(dst->data, 0, ggml_nelements(dst) * sizeof(float));
-    }
-    ggml_barrier(params->threadpool);
-
-    enum ggml_type    const vec_dot_type = type_traits_cpu[src0->type].vec_dot_type;
-    ggml_from_float_t const from_float    = type_traits_cpu[vec_dot_type].from_float;
-
-    GGML_ASSERT(nb00 == ggml_type_size(src0->type));
-    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
-    GGML_ASSERT(nb0  == sizeof(float));
-    GGML_ASSERT(nb0 <= nb1 && nb1 <= nb2 && nb2 <= nb3);
-
-    void * wdata_cur = params->wdata;
-    if (src1->type != vec_dot_type) {
-        incr_ptr_aligned(&wdata_cur, ggml_row_size(vec_dot_type, ggml_nelements(src1)), sizeof(int64_t));
-    }
-    GGML_ASSERT(params->wsize >= (size_t)((char *)wdata_cur - (char *)params->wdata));
-
-    // convert to same type, align precision
-    if (src1->type != vec_dot_type) {
-        char * wdata = params->wdata;
-
-        const size_t nbw0 = ggml_type_size(vec_dot_type);
-        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
-        const size_t nbw2 = nbw1*ne11;
-        const size_t nbw3 = nbw2*ne12;
-
-        assert(params->wsize >= ne13*nbw3);
-        GGML_ASSERT(src1->type == GGML_TYPE_F32);
-
-        for (int64_t i13 = 0; i13 < ne13; ++i13) {
-            for (int64_t i12 = 0; i12 < ne12; ++i12) {
-                for (int64_t i11 = 0; i11 < ne11; ++i11) {
-                    size_t bs = ggml_blck_size(vec_dot_type);
-                    int64_t ne10_block_start = (ith * ne10/bs) / nth;
-                    int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
-                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
-                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
-                               (ne10_block_end - ne10_block_start) * bs);
-                }
-            }
-        }
-    }
-
-    //prepare dynamic chunking (static here: slice src0 rows evenly)
-    if (ith == 0) {
-        atomic_store_explicit(&params->threadpool->current_chunk,
-                              nth, memory_order_relaxed);
-    }
-    ggml_barrier(params->threadpool);
-
-    // Now select a reasonable chunk size. 
-    //      if too small, added back to results would cause atomic-operation latency
-    //      if too large, each thread compute too much element, sparsity leads to unbalance of computing, and higher miss ratio of cache miss?
-    int num_chunks = 32;
-
-    const int64_t rows_per_chunk = (ne01 + num_chunks - 1) / num_chunks;
-
-    // In mulmat sparse, The first chunk comes from our thread_id, the rest will get auto-assigned, do we need this for axpy??
-    int current_chunk = ith;
-    while (current_chunk < num_chunks) {
-        const int64_t start_neu = rows_per_chunk * current_chunk;
-        const int64_t   end_neu = MIN(rows_per_chunk * (current_chunk+1), ne01);
-
-        // chunk compute
-#ifdef USE_NVTX
-        nvtxRangeId_t id_computing = nvtx_init(params, "computing", " ");
-        ggml_compute_forward_axpy_sparse_one_chunk(params, dst, src0->type, start_neu, end_neu);
-        nvtxRangeEnd(id_computing);
-#else
-        ggml_compute_forward_axpy_sparse_one_chunk(params, dst, src0->type, start_neu, end_neu);
-#endif
-
-        // get the next chunk
-        current_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
-    }
-}
-
-static void ggml_compute_forward_axpy_sparse_new(
+static void ggml_compute_forward_axpy_sparse_chunked(
         const struct ggml_compute_params * params,
               struct ggml_tensor * dst) 
 {
@@ -2548,6 +2391,12 @@ static void ggml_compute_forward_axpy_sparse_new(
         }
     }
 
+    if (ith == 0) {
+        // Every thread starts at ith, so the first unprocessed chunk is nth.  This save a bit of coordination right at the start.
+        atomic_store_explicit(&params->threadpool->current_chunk, nth, memory_order_relaxed);
+    }
+    ggml_barrier(params->threadpool);
+
     char        * src0_char  = (char *) src0->data;
     void        * input      = (src1->type == vec_dot_type) ? src1->data : params->wdata;
     float       * sparse_idx = (float *)idx->data;
@@ -2557,71 +2406,221 @@ static void ggml_compute_forward_axpy_sparse_new(
     const int64_t    neu_len_char = nb01;
     const int64_t  token_len_char = ggml_type_size(vec_dot_type) * ne10;
 
-    const int64_t neu_per_thread = (ne01 + nth - 1)/(nth);
-    const int64_t start_neu = neu_per_thread*ith;  // start neu of the thread
-    const int64_t   end_neu = start_neu + neu_per_thread;
+    const int64_t num_chunks = nth * 1;
 
+    const int64_t neu_per_chunk = (ne01 + num_chunks - 1)/(num_chunks);
+    int64_t current_chunk = ith;
 
 #if defined(_MSC_VER)
-    float* vec = (float *)_malloca(ne00 * sizeof(float));
+        float* tmp = (float *)_malloca(ne00 * n_tokens * sizeof(float));
+        memset(tmp, 0, ne00 * n_tokens * sizeof(float));
 #else
-    float vec[ne00];
+        float tmp[ne00 * n_tokens];
+        memset(tmp, 0, ne00 * n_tokens * sizeof(float));
 #endif
+    float *res = (float *)((char *)dst->data);
 
-    void * thread_tmp_rs = vec;
+    while(current_chunk < num_chunks){
+        nvtxRangeId_t id_computing = nvtx_init(params, "computing", " ");
+        const int64_t start_neu = neu_per_chunk*current_chunk;  // start neu of the thread
+        const int64_t   end_neu = start_neu + neu_per_chunk;
+
+        ggml_fp16_t * input_row = NULL;
+        float  * sparse_idx_row = NULL;
+
+        for (int token = 0; token < n_tokens; token++) {
+            input_row = (ggml_fp16_t *)((char *)input + token * token_len_char);
+            sparse_idx_row = (float *)((char *)sparse_idx + token * idx->nb[1]);
+            // memset(thread_tmp_rs, 0, ne00*sizeof(float));
+
+            for (int64_t neu_i = start_neu; neu_i < end_neu; neu_i++) {
+                if (neu_i >= ne01)  continue;
+                if (cpu_mask[neu_i] == 1 ) continue;
+                if (sparse_idx_row[neu_i] < 0.5f && ne11 == 1) continue; // only use sparse inference in batch=1
+
+                ggml_fp16_t alpha_fp16 = input_row[neu_i];
+                float alpha_fp32 = GGML_FP16_TO_FP32(alpha_fp16);
+
+                if (fabsf(alpha_fp32) < 1e-7f) continue;;
+
+                ggml_fp16_t * src0_row = (ggml_fp16_t *)(src0_char + neu_len_char * neu_i);
+                ggml_axpy_avx_f16_alphaf32(ne00, src0_row, tmp + token * ne00, alpha_fp32);
+            }
+        }
+        nvtxRangeEnd(id_computing);
+
+        // write back to res:
+        nvtxRangeId_t id_writeback = nvtx_init(params, "write back", " ");
+#if defined(__AVX2__) 
+        for (int token = 0; token < n_tokens; token++) {
+            float *tmp_token = tmp + token * ne00;
+            float *res_token = res + token * ne00;
+            int i;
+            int remainder = ne00 % 8; // rest elements
+
+            for (i = 0; i < ne00 - remainder; i += 8) {
+                __m256 tmp_vec = _mm256_loadu_ps(tmp_token + i);  // Load tmp values in batch
+                for (int j = 0; j < 8; ++j) {
+#pragma omp atomic
+                    res_token[i + j] += ((float*)&tmp_vec)[j];  // Perform atomic addition for each element
+                }
+            }
+            for (i = ne00 - remainder; i < ne00; i++) {
+#pragma omp atomic
+                res_token[i] += tmp_token[i];
+            }
+        }
+#else
+        for (int token = 0; token < n_tokens; token++) {
+            float *tmp_token = tmp + token * ne00;
+            float *res_token = res + token * ne00;
+            for (int i = 0; i < ne00; i++) {
+#pragma omp atomic
+                res_token[i] += tmp_token[i];
+            }
+        }
+#endif
+        nvtxRangeEnd(id_writeback);
+        if (current_chunk >= num_chunks) {
+            break;
+        }
+        // get the next chunk
+        current_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
+        memset(tmp, 0, ne00 * n_tokens * sizeof(float));
+    }
+}
+
+
+// this version spilt ne00 (neuron_len) dimension for each thread to avoid atomic add
+static void ggml_compute_forward_axpy_sparse_pro(
+        const struct ggml_compute_params * params,
+              struct ggml_tensor * dst) 
+{
+
+    const struct ggml_tensor * src0 = dst->src[0];  // x
+    const struct ggml_tensor * src1 = dst->src[1];  // input
+    const struct ggml_tensor * idx  = dst->src[2];  // sparse idx
+    const struct ggml_tensor * mask = dst->src[3];  // mask
+
+    GGML_ASSERT(mask && "mask is missing");
+    GGML_ASSERT(mask->data && "mask->data is missing");
+
+    GGML_TENSOR_BINARY_OP_LOCALS;
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    // zero the dst buffer once
+    if (ith == 0) {
+        memset(dst->data, 0, ggml_nelements(dst) * sizeof(float));
+    }
+    ggml_barrier(params->threadpool);
+
+    enum ggml_type    const vec_dot_type = type_traits_cpu[src0->type].vec_dot_type;
+    ggml_from_float_t const from_float    = type_traits_cpu[vec_dot_type].from_float;
+
+    GGML_ASSERT(nb00 == ggml_type_size(src0->type));
+    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
+    GGML_ASSERT(nb0  == sizeof(float));
+    GGML_ASSERT(nb0 <= nb1 && nb1 <= nb2 && nb2 <= nb3);
+
+    void * wdata_cur = params->wdata;
+    if (src1->type != vec_dot_type) {
+        incr_ptr_aligned(&wdata_cur, ggml_row_size(vec_dot_type, ggml_nelements(src1)), sizeof(int64_t));
+    }
+    GGML_ASSERT(params->wsize >= (size_t)((char *)wdata_cur - (char *)params->wdata));
+
+    // convert to same type, align precision, src1 fp32->fp16
+    if (src1->type != vec_dot_type) {
+        char * wdata = params->wdata;
+
+        const size_t nbw0 = ggml_type_size(vec_dot_type);
+        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
+        const size_t nbw2 = nbw1*ne11;
+        const size_t nbw3 = nbw2*ne12;
+
+        assert(params->wsize >= ne13*nbw3);
+        GGML_ASSERT(src1->type == GGML_TYPE_F32);
+
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = 0; i12 < ne12; ++i12) {
+                for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                    size_t bs = ggml_blck_size(vec_dot_type);
+                    int64_t ne10_block_start = (ith * ne10/bs) / nth;
+                    int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                               (ne10_block_end - ne10_block_start) * bs);
+                }
+            }
+        }
+    }
+    
+    char        * src0_char  = (char *) src0->data;
+    void        * input      = (src1->type == vec_dot_type) ? src1->data : params->wdata;
+    float       * sparse_idx = (float *)idx->data;
+    int64_t     * cpu_mask   = (int64_t *)mask->data;
+
+    const int64_t  n_tokens         = ne1;
+    const int64_t  neu_len_char     = nb01;
+    const int64_t  token_len_char   = ggml_type_size(vec_dot_type) * ne10;
+
+    // each thread process a portion of result tensor
+    const int64_t  ele_per_thread = (ne00 + nth - 1)/(nth);
+
     ggml_fp16_t * input_row = NULL;
     float  * sparse_idx_row = NULL;
+    
+    // compute this thread's output slice [start, end)
+    const int64_t start = ith * ele_per_thread;
+    int64_t end = start + ele_per_thread;
+    if (end > ne00) end = ne00;
+    const int64_t ele_len = end - start;
+    
+    GGML_ASSERT((ele_len >= 0) && (ele_len % 8 == 0) && "fatal error in spliting axpy tensor");
 
-    for (int token = 0; token < n_tokens; token++) {
-        input_row = (ggml_fp16_t *)((char *)input + token * token_len_char);
-        sparse_idx_row = (float *)((char *)sparse_idx + token * idx->nb[1]);
-        memset(thread_tmp_rs, 0, ne00*sizeof(float));
+    // We'll iterate neurons (0..ne01-1) outer, tokens inner:
+    // for each neuron: load pointer to its weights row, offset by `start`
+    // for each token: read alpha and do axpy on dst[token][start..end)
+    for (int64_t neu_i = 0; neu_i < ne01; ++neu_i) {
+        if (cpu_mask[neu_i] == 1) continue; // neuron masked out globally
 
-        for (int64_t neu_i = start_neu; neu_i < end_neu; neu_i++) {
-            if (neu_i >= ne01)  continue;
-            if (cpu_mask[neu_i] == 1 ) continue;
-            if (sparse_idx_row[neu_i] < 0.5f && ne11 == 1) continue; // only use sparse inference in batch=1
+        // pointer to the beginning of this neuron's weights (fp16)
+        ggml_fp16_t * src0_row = (ggml_fp16_t *)(src0_char + neu_len_char * neu_i);
+        // advance to the start column of this thread's slice
+        ggml_fp16_t * src0_row_offset = src0_row + start;
 
+        // For each token (batch element)
+        for (int token = 0; token < n_tokens; ++token) {
+            // input_row points to the values for this token
+            input_row = (ggml_fp16_t *)((char *)input + token * token_len_char);
+
+            // sparse_idx row for this token (float per neuron)
+            sparse_idx_row = (float *)((char *)sparse_idx + token * idx->nb[1]);
+
+            // sparse condition: if per-token sparse index disables this neuron, skip
+            if (ne11 == 1 && sparse_idx_row[neu_i] < 0.5f) {
+                continue;
+            }
+
+            // load alpha for this neuron and token
             ggml_fp16_t alpha_fp16 = input_row[neu_i];
             float alpha_fp32 = GGML_FP16_TO_FP32(alpha_fp16);
 
-            if (fabsf(alpha_fp32) < 1e-7f) continue;
-
-            ggml_fp16_t * src0_row = (ggml_fp16_t *)(src0_char + neu_len_char * neu_i);
-            ggml_axpy_avx_f16_alphaf32(ne00, src0_row, thread_tmp_rs, alpha_fp32);
-        }
-        
-        float *res = (float *)((char *)(dst->data) + token * nb1);
-        float *tmp = (float *)thread_tmp_rs;
-        
-        // write back
-        int i;
-        int remainder = ne00 % 8; // rest elements
-
-#if defined(__AVX2__)  // we need to do it atomically
-        for (i = 0; i < ne00 - remainder; i += 8) {
-            __m256 tmp_vec = _mm256_loadu_ps(tmp + i);  // Load tmp values in batch
-            for (int j = 0; j < 8; ++j) {
-#pragma omp atomic
-                res[i + j] += ((float*)&tmp_vec)[j];  // Perform atomic addition for each element
+            if (fabsf(alpha_fp32) < 1e-7f) {
+                continue;
             }
-        }
 
-        for (i = ne00 - remainder; i < ne00; i++) {
-#pragma omp atomic
-            res[i] += tmp[i];
+            // destination pointer: dst token-row, at column offset 'start'
+            float * res = (float *)((char *)(dst->data) + token * nb1) + start;
+
+            // perform res[start..end) += alpha * src0_row_offset[0..ele_len)
+            // use existing AVX helper (it loads fp16, converts, does fmadd into float dst)
+            ggml_axpy_avx_f16_alphaf32(ele_len, src0_row_offset, res, alpha_fp32);
         }
-#else
-    for (int i = 0; i < ne00; i++) {
-#pragma omp atomic
-        res[i] += tmp[i];
     }
-#endif
-    }
-#if defined(_MSC_VER)
-    _freea(vec);
-#endif
 }
+
 
 
 /////////////////////////////////
@@ -2758,7 +2757,8 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
         case GGML_OP_AXPY_SPARSE:
             {
                 // int t_start = ggml_time_us();
-                ggml_compute_forward_axpy_sparse_new(params, tensor);
+                // ggml_compute_forward_axpy_sparse_chunked(params, tensor);
+                ggml_compute_forward_axpy_sparse_pro(params, tensor);
                 // int t_end =ggml_time_us();
                 // printf("[DEBUG_CPU]     axpy: tensor->name=%s, time= %lld us\n", tensor->name, t_end-t_start); 
             }break;
