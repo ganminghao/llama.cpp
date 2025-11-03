@@ -2,7 +2,7 @@
 #include "common.cuh"
 #include "axpy_sparse.cuh"
 
-
+template <typename T, typename type_acc>
 static __global__ void mul_mat_axpy_sparse(
     const void * __restrict__ vx, 
     const dfloat * __restrict__ y, 
@@ -44,9 +44,21 @@ static __global__ void mul_mat_axpy_sparse(
         const int vx_i = blk_idx*ncols + col; // vx index, vx was store in "blk_idx way", so indice it with blk_idx
 
         dfloat2 v;
-        const half * x = (const half *) vx;
-        v.x = __half2float(x[vx_i + 0]);
-        v.y = __half2float(x[vx_i + 1]);
+        if constexpr (std::is_same<T, half>::value) {
+            const half * x = reinterpret_cast<const half *>(vx);
+            v.x = __half2float(x[vx_i + 0]);
+            v.y = __half2float(x[vx_i + 1]);
+        } else if constexpr (std::is_same<T, __nv_bfloat16>::value) {
+            const __nv_bfloat16 * x = reinterpret_cast<const __nv_bfloat16 *>(vx);
+            v.x = __bfloat162float(x[vx_i + 0]);
+            v.y = __bfloat162float(x[vx_i + 1]);
+        } else if constexpr (std::is_same<T, float>::value) {
+            const float * x = reinterpret_cast<const float *>(vx);
+            v.x = x[vx_i + 0];
+            v.y = x[vx_i + 1];
+        }else {
+            static_assert(std::is_same<T, void>::value, "unsupported type for axpy_sparse");
+        }
 
         // matrix multiplication, process 2 vals per j iter
         tmp = v.x * alpha_fp32;
@@ -61,6 +73,7 @@ static __global__ void mul_mat_axpy_sparse(
     }
 }
 
+template <typename T, typename type_acc>
 static __global__ void mul_mat_axpy_sparse_batch(
     const void * __restrict__ vx, 
     const dfloat * __restrict__ y, 
@@ -86,10 +99,10 @@ static __global__ void mul_mat_axpy_sparse_batch(
 
     float alpha_fp32 = y[neu];
 
-    // if (fabsf(alpha_fp32) < 1e-9f || sparse_idx[neu] < 0.5f) {
-    //     // if (tid == 0) dst[gpu_neu] = 0.0f;
-    //     return;
-    // }
+    if (fabsf(alpha_fp32) < 1e-9f || sparse_idx[neu] < 0.5f) {
+        // if (tid == 0) dst[gpu_neu] = 0.0f;
+        return;
+    }
 
     extern __shared__ float shared_dst[]; // TODO:dynamic
     
@@ -108,9 +121,21 @@ static __global__ void mul_mat_axpy_sparse_batch(
         const int vx_i = blk_idx*ncols + col; // vx index, vx was store in "blk_idx way", so indice it with blk_idx
 
         dfloat2 v;
-        const half * x = (const half *) vx;
-        v.x = __half2float(x[vx_i + 0]);
-        v.y = __half2float(x[vx_i + 1]);
+        if constexpr (std::is_same<T, half>::value) {
+            const half * x = reinterpret_cast<const half *>(vx);
+            v.x = __half2float(x[vx_i + 0]);
+            v.y = __half2float(x[vx_i + 1]);
+        } else if constexpr (std::is_same<T, __nv_bfloat16>::value) {
+            const __nv_bfloat16 * x = reinterpret_cast<const __nv_bfloat16 *>(vx);
+            v.x = __bfloat162float(x[vx_i + 0]);
+            v.y = __bfloat162float(x[vx_i + 1]);
+        } else if constexpr (std::is_same<T, float>::value) {
+            const float * x = reinterpret_cast<const float *>(vx);
+            v.x = x[vx_i + 0];
+            v.y = x[vx_i + 1];
+        } else {
+            static_assert(std::is_same<T, void>::value, "unsupported type for axpy_sparse");
+        }
 
         // matrix multiplication, process 2 vals per j iter
         tmp = v.x * alpha_fp32;
@@ -138,12 +163,12 @@ static void launch_mul_mat_axpy_cuda_sparse(
         const dim3 block_nums(num_blocks, 1, 1);
         const dim3 block_dims(WARP_SIZE, 1, 1);
 
-        mul_mat_axpy_sparse<<<block_nums, block_dims, ncols*sizeof(float), stream>>>(x, y, dst, ncols, nrows, gpu_neu_idx, sparse_idx);
+        mul_mat_axpy_sparse<T,type_acc><<<block_nums, block_dims, ncols*sizeof(float), stream>>>(x, y, dst, ncols, nrows, gpu_neu_idx, sparse_idx);
     }
     else{ // batch_axpy
         const dim3 block_nums(num_blocks, src_ncols, 1);
         const dim3 block_dims(WARP_SIZE, 1, 1);
-        mul_mat_axpy_sparse_batch<<<block_nums, block_dims, ncols*sizeof(float), stream>>>(x, y, dst, ncols, nrows, gpu_neu_idx, sparse_idx);
+        mul_mat_axpy_sparse_batch<T,type_acc><<<block_nums, block_dims, ncols*sizeof(float), stream>>>(x, y, dst, ncols, nrows, gpu_neu_idx, sparse_idx);
     }
 
 }

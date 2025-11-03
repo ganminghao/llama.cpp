@@ -2051,6 +2051,7 @@ static void ggml_cuda_mul_mat_sparse(ggml_backend_cuda_context & ctx, const ggml
     GGML_ASSERT(dst->src[2] != NULL && "dst->src[2] must be present for sparse matrix multiplication");
     switch(src0->type) {
         case GGML_TYPE_F16:
+        case GGML_TYPE_BF16:
             ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_sparse, nullptr);
             break;
         default:
@@ -2062,6 +2063,7 @@ static void ggml_cuda_axpy_sparse(ggml_backend_cuda_context & ctx, const ggml_te
     GGML_ASSERT(dst->src[2] != NULL && "dst->src[2] must be present for sparse matrix multiplication");
     switch(src0->type) {
         case GGML_TYPE_F16:
+        case GGML_TYPE_BF16:
             ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_axpy_sparse, nullptr);
             break;
         default:
