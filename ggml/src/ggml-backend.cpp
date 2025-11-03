@@ -1254,7 +1254,7 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
 
                 if (src_backend_id != cur_backend_id && !ggml_backend_sched_buffer_supported(sched, src, cur_backend_id)) {
                     bool spif_skip_cpy = false;
-                    if (strstr(src->name, "ffn_gate.weight") || strstr(src->name, "ffn_up.weight") || strstr(src->name, "ffn_down_t.weight") || !strstr(node->name, "sparse")) {
+                    if (strstr(src->name, "ffn_gate.weight") || strstr(src->name, "ffn_up.weight") || strstr(src->name, "ffn_down_t.weight")) {
                         // in sparkinfer reloading splits, we skip the copy of these tensors since they are reloaded on the GPU
                         spif_skip_cpy = true;
                     }
@@ -1500,21 +1500,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 #endif
+        // in Sparkinfer reloading plan, this happen in cuda backend, but we need sparseidx in cpu, 
+        // so we need to reuse the sparse idx tensor from prev CPU split
+        if (split->graph.nodes[0]->op == GGML_OP_RELOAD_PLAN){
+            size_t id = hash_id(split->graph.nodes[0]->src[0]);
+            int cpu_backend_id = sched->n_backends - 1; // CPU backend 
+            GGML_ASSERT(tensor_id_copy(id, cpu_backend_id, sched->cur_copy) != NULL);
+            split->graph.nodes[0]->src[0] = tensor_id_copy(id, cpu_backend_id, sched->cur_copy);
+        }
  
         // copy the input tensors to the split backend
         for (int j = 0; j < split->n_inputs; j++) {
             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[j]);
             struct ggml_tensor * input = split->inputs[j];
-
-            // in the splits of reload in sparkinfer we dont need to copy the gpu inputs back to GPU
-            // for now we ensure there is only reload splits would have the input of cpu_ffn tensors
-            // this is quite hacky, but it works for now [GTODO] we need a better way to handle this
-            if (strstr(input->name, "ffn_gate.weight") || strstr(input->name, "ffn_up.weight") || strstr(input->name, "ffn_down_t.weight")) {
-                // printf("%s: %s\n", input->name, ggml_backend_buffer_name(input->buffer));
-                // printf("skipping copy of %s from %s to %s\n", input->name, ggml_backend_name(input_backend), ggml_backend_name(split_backend));
-                continue;
-            }
-            
             struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
             
             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
