@@ -1048,6 +1048,19 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
                 cb(cur_hidden, "ffn_gate_par", il);
             }
             break;
+        case LLM_ARCH_BAMBOO:
+            {
+                GGML_ASSERT(gate && "FFN_GATE is not found in bamboo");
+                cur_gate = ggml_relu(ctx0, cur_gate);
+                cb(cur_gate, "ffn_gate_relu", il);
+
+                cur_up = ggml_relu(ctx0, cur_up);
+                cb(cur_up, "ffn_up_relu", il);
+
+                cur_hidden = ggml_mul(ctx0, cur_gate, cur_up);
+                cb(cur_hidden, "ffn_gate_par", il);
+            }
+            break;
         default:
             GGML_ABORT("Currently build_sparse_ffn does not support this model");
     }

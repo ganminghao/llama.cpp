@@ -2532,10 +2532,11 @@ static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor *
         CUDA_CHECK(cudaMemcpyAsync(neuron_idx, neuron_idx_buf, sizeof(int32_t) * m, cudaMemcpyHostToDevice, io_stream));
     }
 
-    auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(dst->extra);
-    for (int k = 0; k < spif_extra->event_count; ++k) {
-        if (spif_extra->states[k] == SPIF_MANUAL) {
-            CUDA_CHECK(cudaEventRecord((cudaEvent_t) spif_extra->events[k]->context, io_stream));
+    if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(dst->extra); spif_extra){
+        for (int k = 0; k < spif_extra->event_count; ++k) {
+            if (spif_extra->states[k] == SPIF_MANUAL) {
+                CUDA_CHECK(cudaEventRecord((cudaEvent_t) spif_extra->events[k]->context, io_stream));
+            }
         }
     }
 }

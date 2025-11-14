@@ -76,13 +76,34 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         /*.no_alloc = */ false,
         /*.ctx      = */ &ctx_meta,
     };
-    gguf_context * ctx_gguf = gguf_init_from_file(spif_ms_path.c_str(), gguf_params);
 
-    const int64_t layer_neuron_count = gguf_get_val_i64(ctx_gguf, gguf_find_key(ctx_gguf, "layer_neuron_count"));
-    const int64_t layer_group_count  = gguf_get_val_i64(ctx_gguf, gguf_find_key(ctx_gguf, "layer_group_count"));
-    const int64_t layer_group_size   = layer_neuron_count / layer_group_count;
-    const auto *  cache_sizes_from_gguf =
-        static_cast<const int32_t *>(gguf_get_arr_data(ctx_gguf, gguf_find_key(ctx_gguf, "layer_neuron_cache_size")));
+    const bool dummy_mode = (strstr(spif_ms_path.c_str(), "dummy") != nullptr);
+    if (dummy_mode && getenv("SPIF_REORDER") != nullptr) GGML_ABORT("SPIF_REORDER not supported in dummy mode");
+
+    gguf_context * ctx_gguf = nullptr;
+    const int32_t * cache_sizes_from_gguf = nullptr;
+    int64_t layer_neuron_count = 0;
+    int64_t layer_group_size = 0;
+    int64_t layer_group_count = 0;
+
+    if(!dummy_mode) {
+        ctx_gguf = gguf_init_from_file(spif_ms_path.c_str(), gguf_params);
+    }
+
+    if(dummy_mode){
+        // dummy values for simulation
+        layer_neuron_count = static_cast<int64_t>(model.hparams.n_ff(0));
+        layer_group_size   = 8;
+        layer_group_count  = layer_neuron_count / layer_group_size;
+        cache_sizes_from_gguf =
+            std::vector<int32_t>(model.hparams.n_layer, layer_neuron_count / 4).data();
+    }else{
+        layer_neuron_count = gguf_get_val_i64(ctx_gguf, gguf_find_key(ctx_gguf, "layer_neuron_count"));
+        layer_group_count  = gguf_get_val_i64(ctx_gguf, gguf_find_key(ctx_gguf, "layer_group_count"));
+        layer_group_size   = layer_neuron_count / layer_group_count;
+        cache_sizes_from_gguf =
+            static_cast<const int32_t *>(gguf_get_arr_data(ctx_gguf, gguf_find_key(ctx_gguf, "layer_neuron_cache_size")));
+    }
 
     ggml_init_params ctx_params = {
         /*.mem_size   = */ ggml_tensor_overhead() * 512,  // magic number here
@@ -174,17 +195,19 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         buf_gpu = ggml_backend_alloc_ctx_tensors(ctx_gpu, backend_gpu);
     }
 
-    for (int i = 0; i < gguf_get_n_tensors(ctx_gguf); ++i) {
-        const char *  name       = gguf_get_tensor_name(ctx_gguf, i);
-        ggml_tensor * src_tensor = ggml_get_tensor(ctx_meta, name);
-        ggml_tensor * dst_tensor = ggml_get_tensor(ctx_cpu, name);
+    if (!dummy_mode) {
+        for (int i = 0; i < gguf_get_n_tensors(ctx_gguf); ++i) {
+            const char *  name       = gguf_get_tensor_name(ctx_gguf, i);
+            ggml_tensor * src_tensor = ggml_get_tensor(ctx_meta, name);
+            ggml_tensor * dst_tensor = ggml_get_tensor(ctx_cpu, name);
 
-        const auto nbytes = ggml_nbytes(src_tensor);
-        ggml_backend_tensor_set(dst_tensor, src_tensor->data, 0, nbytes);
+            const auto nbytes = ggml_nbytes(src_tensor);
+            ggml_backend_tensor_set(dst_tensor, src_tensor->data, 0, nbytes);
+        }
+
+        gguf_free(ctx_gguf);
+        ggml_free(ctx_meta);
     }
-
-    gguf_free(ctx_gguf);
-    ggml_free(ctx_meta);
 
     auto reorder_tensor_2d = [&](ggml_tensor * tensor, std::vector<int64_t> & perm) {
         const auto n_cols        = tensor->ne[0];

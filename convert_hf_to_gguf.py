@@ -4380,6 +4380,11 @@ class ProSparseLlamaModel(LlamaModel):
         self.gguf_writer.add_pred_lora(self.pred_lora)
 
 
+@ModelBase.register("BambooForCausalLM")
+class BambooModel(ProSparseLlamaModel):
+    model_arch = gguf.MODEL_ARCH.BAMBOO
+    # Bamboo uses the same architecture as ProSparseLlama
+
 @ModelBase.register("GPT2LMHeadModel")
 class GPT2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.GPT2
@@ -10462,5 +10467,10 @@ if __name__ == '__main__':
             --pred-bias \
             --outtype bf16 \
             --outfile /share/models/prosparse-7b-gguf-w-our-predictor/prosparse-7b.gguf
+
+        python convert_hf_to_gguf.py /root/autodl-tmp/models/Bamboo-base-v0_1 \
+            --pred-path /root/autodl-tmp/models/Bamboo-base-v0.1-predictor-pwif \
+            --outtype bf16 \
+            --outfile /root/autodl-tmp/models/bamboo-pwif.gguf
     '''
     main()
