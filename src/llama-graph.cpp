@@ -1064,6 +1064,14 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
                 cb(cur_hidden, "ffn_gate_par", il);
             }
             break;
+        case LLM_ARCH_OPT:
+            {
+                GGML_ASSERT(!gate && "FFN_GATE should not be set in OPT");
+                cur_up = ggml_relu(ctx0, cur_up);
+                cb(cur_up, "ffn_up_relu", il);
+                cur_hidden = cur_up;
+            }
+            break;
         default:
             GGML_ABORT("Currently build_sparse_ffn does not support this model");
     }

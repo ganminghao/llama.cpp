@@ -132,6 +132,7 @@ add_library(llama
             models/wavtokenizer-dec.cpp
             models/xverse.cpp
             models/graph-context-mamba.cpp
+            models/opt.cpp
             )
 
 set_target_properties(llama PROPERTIES
