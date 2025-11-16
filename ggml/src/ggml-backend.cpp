@@ -1719,6 +1719,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(split->graph.nodes[0]->extra);
                 spif_extra && spif_extra->async_split == SPIF_ASYNC_SPLIT_HEAD &&
                 ggml_backend_dev_type(sched->backends[splits[split_id + 1].backend_id]->device) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                sched->spif_executor->sync_with_posts().wait(); // TODO: ???
                 split_fut = sched->spif_executor->submit(ggml_backend_graph_compute_async, split_backend, &split->graph);
             } else {
                 enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
