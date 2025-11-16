@@ -31,7 +31,7 @@ else
 fi
 
 if [[ ${2-} == "nvtx" ]]; then
-    nsys profile --trace=cuda,osrt,nvtx "$bin" "${inference_opts[@]}"
+    nsys profile --trace=cuda,nvtx "$bin" "${inference_opts[@]}"
 else
     "$bin" "${inference_opts[@]}"
 fi

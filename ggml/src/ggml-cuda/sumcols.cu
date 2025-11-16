@@ -64,31 +64,6 @@ static __global__ void sum_cols_f32(const float * src,
     GGML_UNUSED(nb1);
 }
 
-// CUDA wrapper
-static void sum_cols_f32_cuda(const float * src,
-                              float *       dst,
-                              const int64_t ne00,
-                              const int64_t ne01,
-                              const int64_t ne02,
-                              const int64_t ne03,
-                              const int64_t nb00,
-                              const int64_t nb01,
-                              const int64_t nb02,
-                              const int64_t nb03,
-                              const int64_t nb0,
-                              const int64_t nb1,
-                              const int64_t nb2,
-                              const int64_t nb3,
-                              cudaStream_t  stream) {
-    dim3 block_dims(256, 1, 1);
-    dim3 grid_dims(ne00, ne02, ne03);
-
-    size_t shmem_size = block_dims.x * sizeof(float);
-
-    sum_cols_f32<<<grid_dims, block_dims, shmem_size, stream>>>(src, dst, ne00, ne01, ne02, ne03, nb00, nb01, nb02,
-                                                                nb03, nb0, nb1, nb2, nb3);
-}
-
 // ggml entry point
 void ggml_cuda_op_sum_cols(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0   = dst->src[0];
@@ -98,7 +73,12 @@ void ggml_cuda_op_sum_cols(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
     GGML_ASSERT(ggml_is_contiguous(src0));
 
-    sum_cols_f32_cuda((const float *) src0->data, (float *) dst->data, src0->ne[0], src0->ne[1], src0->ne[2],
-                      src0->ne[3], src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3], dst->nb[0], dst->nb[1],
-                      dst->nb[2], dst->nb[3], stream);
+    dim3 block_dims(256, 1, 1);
+    dim3 grid_dims(src0->ne[0], src0->ne[2], src0->ne[3]);
+
+    size_t shmem_size = block_dims.x * sizeof(float);
+
+    sum_cols_f32<<<grid_dims, block_dims, shmem_size, stream>>>(
+        (const float *) src0->data, (float *) dst->data, src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+        src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3], dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3]);
 }

@@ -46,10 +46,12 @@ struct sparkinfer_layer_cache {
     ggml_tensor * group_mask  = nullptr;
     ggml_tensor * dfr_scores  = nullptr;
 
+    cache_meta  layer_cm;
+    copy_pair * reload_plan;
+
     static const bool k_enable_spif_reload;
-    cache_meta        layer_cm;
-    copy_pair *       reload_plan;
-    int               num_ops;
+    size_t            reload_cnt      = 0;
+    size_t            reload_wnd_size = 8;
 
     ggml_tensor * weight_only_buf;
     ggml_tensor * cache_only_buf;
@@ -58,11 +60,9 @@ struct sparkinfer_layer_cache {
     sparkinfer_layer_cache()  = default;
     ~sparkinfer_layer_cache() = default;
 
-    ggml_tensor * build_reload(ggml_context *         ctx0,
-                               ggml_tensor *          weight_only,
-                               ggml_tensor *          cache_only,
-                               sparkinfer_weight_type spif_wt);
-    void          sparkinfer_reload_plan(const float * weight_only, const float * cache_only, int32_t * neuron_idx);
+    ggml_tensor * build_reload_plan(ggml_context * ctx0, ggml_tensor * weight_only, ggml_tensor * cache_only);
+    ggml_tensor * build_reload_exec(ggml_context * ctx0, ggml_tensor * cur, sparkinfer_weight_type spif_wt);
+    void          sparkinfer_reload_plan();
 };
 
 // sparkinfer async kernel caller and io executor
@@ -84,10 +84,18 @@ struct SingleThreadExecutor {
     auto submit(F && f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...>> {
         using R = std::invoke_result_t<F, Args...>;
         std::packaged_task<R()> task(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
-        auto                    task_future = task.get_future();
-        auto                    task_ptr    = std::make_shared<std::packaged_task<R()>>(std::move(task));
+        auto                    fut      = task.get_future();
+        auto                    task_ptr = std::make_shared<std::packaged_task<R()>>(std::move(task));
         enqueue([task_ptr]() { (*task_ptr)(); });
-        return task_future;
+        return fut;
+    }
+
+    auto sync_with_posts() {
+        std::packaged_task<void()> task([] {});
+        auto                       fut      = task.get_future();
+        auto                       task_ptr = std::make_shared<std::packaged_task<void()>>(std::move(task));
+        enqueue_io([task_ptr] { (*task_ptr)(); });
+        return fut;
     }
 
     void stop() noexcept {

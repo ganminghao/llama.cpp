@@ -2487,6 +2487,51 @@ static void ggml_cuda_axpy_sparse(ggml_backend_cuda_context & ctx,
             GGML_ASSERT(false && "unsupported type for sparse matrix multiplication");
     }
 }
+static void ggml_cuda_reload_plan(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    void * obj = nullptr;
+    memcpy((void *) &obj, &(dst->op_params[0]), sizeof(void *));
+    auto * spif_lc = static_cast<sparkinfer_layer_cache *>(obj);
+
+    cudaStream_t main_stream = ctx.stream();
+    CUDA_CHECK(cudaMemcpyAsync(static_cast<float *>(spif_lc->weight_only_buf->data),
+                               static_cast<const float *>(dst->src[0]->data), sizeof(float) * spif_lc->layer_cm.n_g,
+                               cudaMemcpyDeviceToHost, main_stream));
+    CUDA_CHECK(cudaMemcpyAsync(static_cast<float *>(spif_lc->cache_only_buf->data),
+                               static_cast<const float *>(dst->src[1]->data), sizeof(float) * spif_lc->layer_cm.n_g,
+                               cudaMemcpyDeviceToHost, main_stream));
+    CUDA_CHECK(cudaMemcpyAsync(static_cast<int32_t *>(spif_lc->neuron_idx_buf->data),
+                               static_cast<int32_t *>(spif_lc->neuron_idx->data), sizeof(int32_t) * spif_lc->layer_cm.m,
+                               cudaMemcpyDeviceToHost, main_stream));
+    CUDA_CHECK(cudaStreamSynchronize(main_stream));
+
+    spif_lc->sparkinfer_reload_plan();
+
+    CUDA_CHECK(cudaMemcpyAsync(static_cast<int32_t *>(spif_lc->neuron_idx->data),
+                               static_cast<int32_t *>(spif_lc->neuron_idx_buf->data),
+                               sizeof(int32_t) * spif_lc->layer_cm.m, cudaMemcpyHostToDevice, main_stream));
+    CUDA_CHECK(cudaStreamSynchronize(main_stream));
+}
+
+static void sparkinfer_reload_task(char *       weight_base,
+                                   char *       cache_base,
+                                   size_t       nbytes,
+                                   cudaStream_t stream,
+                                   size_t       wnd_offset,
+                                   size_t       wnd_size,
+                                   copy_pair *  reload_plan) {
+    char * weight_ptr = nullptr;
+    char * cache_ptr  = nullptr;
+    for (size_t i = 0; i < wnd_size; ++i) {
+        weight_ptr = weight_base + reload_plan[wnd_offset + i].weight_idx * nbytes;
+        cache_ptr  = cache_base + reload_plan[wnd_offset + i].cache_idx * nbytes;
+        CUDA_CHECK(cudaMemcpyAsync(cache_ptr, weight_ptr, nbytes, cudaMemcpyHostToDevice, stream));
+    }
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+static void sparkinfer_reload_event_record_task(ggml_backend_event_t event, cudaStream_t stream) {
+    CUDA_CHECK(cudaEventRecord((cudaEvent_t) event->context, stream));
+}
 
 static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     auto   spif_wt = static_cast<sparkinfer_weight_type>(dst->op_params[0]);
@@ -2494,66 +2539,44 @@ static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor *
     memcpy((void *) &obj, &(dst->op_params[1]), sizeof(void *));
     auto * spif_lc = static_cast<sparkinfer_layer_cache *>(obj);
 
-    // clang-format off
     char * weight_base = nullptr;
     char * cache_base  = nullptr;
-    bool   only_memcpy = true;
     switch (spif_wt) {
-        case SPIF_FFN_UP: {
-            weight_base = static_cast<char *>(spif_lc->layer_ffn_up->data);
-            cache_base  = static_cast<char *>(spif_lc->ffn_up_cache->data);
-            only_memcpy = false;
-        } break;
-        case SPIF_FFN_GATE: {
-            weight_base = static_cast<char *>(spif_lc->layer_ffn_gate->data);
-            cache_base  = static_cast<char *>(spif_lc->ffn_gate_cache->data);
-        } break;
-        case SPIF_FFN_DOWN: {
-            weight_base = static_cast<char *>(spif_lc->layer_ffn_down->data);
-            cache_base  = static_cast<char *>(spif_lc->ffn_down_cache->data);
-        } break;
-    };
-    // clang-format on
-
-    cudaStream_t  main_stream      = ctx.stream();
-    cudaStream_t  io_stream        = ctx.stream(ctx.device, 1);
-    const float * weight_only      = static_cast<const float *>(dst->src[0]->data);
-    float *       weight_only_buf  = static_cast<float *>(spif_lc->weight_only_buf->data);
-    const float * cache_only       = static_cast<const float *>(dst->src[1]->data);
-    float *       cache_only_buf   = static_cast<float *>(spif_lc->cache_only_buf->data);
-    int32_t *     neuron_idx       = static_cast<int32_t *>(spif_lc->neuron_idx->data);
-    int32_t *     neuron_idx_buf   = static_cast<int32_t *>(spif_lc->neuron_idx_buf->data);
-    const auto [n, m, g, n_g, m_g] = spif_lc->layer_cm;
-    const size_t grp_nbytes        = g * ggml_row_size(spif_lc->layer_ffn_up->type, spif_lc->layer_ffn_up->ne[0]);
-
-    if (!only_memcpy) {
-        CUDA_CHECK(
-            cudaMemcpyAsync(weight_only_buf, weight_only, sizeof(float) * n_g, cudaMemcpyDeviceToHost, main_stream));
-        CUDA_CHECK(
-            cudaMemcpyAsync(cache_only_buf, cache_only, sizeof(float) * n_g, cudaMemcpyDeviceToHost, main_stream));
-        CUDA_CHECK(
-            cudaMemcpyAsync(neuron_idx_buf, neuron_idx, sizeof(int32_t) * m, cudaMemcpyDeviceToHost, main_stream));
-        CUDA_CHECK(cudaStreamSynchronize(main_stream));
-        spif_lc->sparkinfer_reload_plan(weight_only_buf, cache_only_buf, neuron_idx_buf);
-    }
-
-    char * weight_ptr = nullptr;
-    char * cache_ptr  = nullptr;
-    for (int i = 0; i < spif_lc->num_ops; ++i) {
-        weight_ptr = weight_base + spif_lc->reload_plan[i].weight_idx * grp_nbytes;
-        cache_ptr  = cache_base + spif_lc->reload_plan[i].cache_idx * grp_nbytes;
-        CUDA_CHECK(cudaMemcpyAsync(cache_ptr, weight_ptr, grp_nbytes, cudaMemcpyHostToDevice, io_stream));
-    }
-
-    if (!only_memcpy) {
-        CUDA_CHECK(cudaMemcpyAsync(neuron_idx, neuron_idx_buf, sizeof(int32_t) * m, cudaMemcpyHostToDevice, io_stream));
-    }
-
-    if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(dst->extra); spif_extra) {
-        for (int k = 0; k < spif_extra->event_count; ++k) {
-            if (spif_extra->states[k] == SPIF_MANUAL) {
-                CUDA_CHECK(cudaEventRecord((cudaEvent_t) spif_extra->events[k]->context, io_stream));
+        case SPIF_FFN_UP:
+            {
+                weight_base = static_cast<char *>(spif_lc->layer_ffn_up->data);
+                cache_base  = static_cast<char *>(spif_lc->ffn_up_cache->data);
             }
+            break;
+        case SPIF_FFN_GATE:
+            {
+                weight_base = static_cast<char *>(spif_lc->layer_ffn_gate->data);
+                cache_base  = static_cast<char *>(spif_lc->ffn_gate_cache->data);
+            }
+            break;
+        case SPIF_FFN_DOWN:
+            {
+                weight_base = static_cast<char *>(spif_lc->layer_ffn_down->data);
+                cache_base  = static_cast<char *>(spif_lc->ffn_down_cache->data);
+            }
+            break;
+    };
+
+    const size_t grp_nbytes =
+        spif_lc->layer_cm.g * ggml_row_size(spif_lc->layer_ffn_up->type, spif_lc->layer_ffn_up->ne[0]);
+    cudaStream_t io_stream = ctx.stream(ctx.device, 1);
+
+    auto * spif_extra    = static_cast<sparkinfer_tensor_extra *>(dst->extra);
+    auto * spif_executor = static_cast<SingleThreadExecutor *>(spif_extra->spif_executor);
+    for (size_t wnd_offset = 0; wnd_offset < spif_lc->reload_cnt; wnd_offset += spif_lc->reload_wnd_size) {
+        size_t wnd_size = MIN(spif_lc->reload_wnd_size, spif_lc->reload_cnt - wnd_offset);
+        spif_executor->post(sparkinfer_reload_task, weight_base, cache_base, grp_nbytes, io_stream, wnd_offset,
+                            wnd_size, spif_lc->reload_plan);
+    }
+
+    for (int k = 0; k < spif_extra->event_count; ++k) {
+        if (spif_extra->states[k] == SPIF_MANUAL) {
+            spif_executor->post(sparkinfer_reload_event_record_task, spif_extra->events[k], io_stream);
         }
     }
 }
@@ -2772,6 +2795,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_AXPY_SPARSE:
             ggml_cuda_axpy_sparse(ctx, dst->src[0], dst->src[1], dst);
+            break;
+        case GGML_OP_RELOAD_PLAN:
+            ggml_cuda_reload_plan(ctx, dst);
             break;
         case GGML_OP_RELOAD_EXEC:
             ggml_cuda_reload_exec(ctx, dst);
@@ -4252,6 +4278,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                         return false;
                 }
             } break;
+        case GGML_OP_RELOAD_PLAN:
         case GGML_OP_RELOAD_EXEC:
             return true;
         case GGML_OP_OUT_PROD:
