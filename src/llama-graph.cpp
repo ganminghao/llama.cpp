@@ -905,7 +905,7 @@ void llm_graph_context::build_predictor_and_reload(ggml_tensor *            cur,
             ctx0, ggml_sum_rows(ctx0, ggml_reshape_2d(ctx0, mask, spif_lc->layer_cm.g, spif_lc->layer_cm.n_g)));
         ggml_tensor * topk_idx =
             ggml_top_k(ctx0, ggml_add_inplace(ctx0, decayed_dfr_scores, scores), spif_lc->layer_cm.m_g);
-        ggml_tensor * topk_mask = ggml_sum_cols(ctx0, ggml_get_rows(ctx0, spif_cm->identity, topk_idx));
+        ggml_tensor * topk_mask   = ggml_sum_cols(ctx0, ggml_get_rows(ctx0, spif_cm->identity, topk_idx));
         ggml_tensor * diff_mask   = ggml_xor(ctx0, spif_lc->group_mask, topk_mask);
         ggml_tensor * weight_only = ggml_and(ctx0, topk_mask, diff_mask);
         cb(weight_only, "ffn_weight_only", il);
@@ -915,7 +915,9 @@ void llm_graph_context::build_predictor_and_reload(ggml_tensor *            cur,
         ggml_build_forward_expand(gf, cache_only);
         ggml_build_forward_expand(gf, ggml_cpy(ctx0, topk_mask, spif_lc->group_mask));
 
-        ggml_tensor * cur_reload_up = spif_lc->build_reload(ctx0, weight_only, cache_only, SPIF_FFN_UP);
+        ggml_tensor * cur_reload_plan = spif_lc->build_reload_plan(ctx0, weight_only, cache_only);
+        cb(cur_reload_plan, "ffn_reload_plan", il);
+        ggml_tensor * cur_reload_up   = spif_lc->build_reload_exec(ctx0, cur_reload_plan, SPIF_FFN_UP);
         cb(cur_reload_up, "ffn_up_reload", il);
         ggml_backend_sched_set_tensor_backend(sched, cur_reload_up, backend_gpu);
         ggml_build_forward_expand(gf, cur_reload_up);
@@ -923,14 +925,14 @@ void llm_graph_context::build_predictor_and_reload(ggml_tensor *            cur,
 
         ggml_tensor * cur_reload_gate = nullptr;
         if (spif_lc->layer_ffn_gate) {
-            cur_reload_gate = spif_lc->build_reload(ctx0, weight_only, cache_only, SPIF_FFN_GATE);
+            cur_reload_gate = spif_lc->build_reload_exec(ctx0, cur_reload_plan, SPIF_FFN_GATE);
             cb(cur_reload_gate, "ffn_gate_reload", il);
             ggml_backend_sched_set_tensor_backend(sched, cur_reload_gate, backend_gpu);
             ggml_build_forward_expand(gf, cur_reload_gate);
             spif_lc->reload_gate = cur_reload_gate;
         }
 
-        ggml_tensor * cur_reload_down = spif_lc->build_reload(ctx0, weight_only, cache_only, SPIF_FFN_DOWN);
+        ggml_tensor * cur_reload_down = spif_lc->build_reload_exec(ctx0, cur_reload_plan, SPIF_FFN_DOWN);
         cb(cur_reload_down, "ffn_down_reload", il);
         ggml_backend_sched_set_tensor_backend(sched, cur_reload_down, backend_gpu);
         ggml_build_forward_expand(gf, cur_reload_down);

@@ -11,37 +11,47 @@
 
 const bool sparkinfer_layer_cache::k_enable_spif_reload = (getenv("SPIF_RELOAD") != nullptr);
 
-ggml_tensor * sparkinfer_layer_cache::build_reload(ggml_context *         ctx0,
-                                                   ggml_tensor *          weight_only,
-                                                   ggml_tensor *          cache_only,
-                                                   sparkinfer_weight_type wt) {
+ggml_tensor * sparkinfer_layer_cache::build_reload_plan(ggml_context * ctx0,
+                                                        ggml_tensor *  weight_only,
+                                                        ggml_tensor *  cache_only) {
     ggml_tensor * result = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
 
-    result->op_params[0] = static_cast<int32_t>(wt);
-    void * this_ptr      = static_cast<void *>(this);
-    memcpy(&(result->op_params[1]), static_cast<void *>(&this_ptr), sizeof(void *));
+    void * this_ptr = static_cast<void *>(this);
+    memcpy(&(result->op_params[0]), static_cast<void *>(&this_ptr), sizeof(void *));
 
-    if (k_enable_spif_reload) {
-        result->op = GGML_OP_RELOAD_EXEC;
-    } else {
-        result->op = GGML_OP_NONE;
-    }
+    result->op     = k_enable_spif_reload ? GGML_OP_RELOAD_PLAN : GGML_OP_VIEW;
     result->src[0] = weight_only;
     result->src[1] = cache_only;
 
     return result;
 }
 
-void sparkinfer_layer_cache::sparkinfer_reload_plan(const float * weight_only,
-                                                    const float * cache_only,
-                                                    int32_t *     neuron_idx) {
-    auto [n, m, g, n_g, m_g] = layer_cm;
+ggml_tensor * sparkinfer_layer_cache::build_reload_exec(ggml_context *         ctx0,
+                                                        ggml_tensor *          cur,
+                                                        sparkinfer_weight_type wt) {
+    ggml_tensor * result = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+
+    result->op_params[0] = static_cast<int32_t>(wt);
+    void * this_ptr      = static_cast<void *>(this);
+    memcpy(&(result->op_params[1]), static_cast<void *>(&this_ptr), sizeof(void *));
+
+    result->op     = k_enable_spif_reload ? GGML_OP_RELOAD_EXEC : GGML_OP_VIEW;
+    result->src[0] = cur;
+
+    return result;
+}
+
+void sparkinfer_layer_cache::sparkinfer_reload_plan() {
+    float *   weight_only    = static_cast<float *>(weight_only_buf->data);
+    float *   cache_only     = static_cast<float *>(cache_only_buf->data);
+    int32_t * neuron_idx     = static_cast<int32_t *>(neuron_idx_buf->data);
     int32_t * group_maps     = static_cast<int32_t *>(this->group_maps->data);
     int32_t * neuron_mask    = static_cast<int32_t *>(this->neuron_mask->data);
+    auto [n, m, g, n_g, m_g] = layer_cm;
 
     int weight_idx = 0;
     int cache_idx  = 0;
-    num_ops        = 0;
+    reload_cnt     = 0;
 
     for (;;) {
         while (weight_idx < n_g && !weight_only[weight_idx]) {
@@ -67,9 +77,9 @@ void sparkinfer_layer_cache::sparkinfer_reload_plan(const float * weight_only,
         }
         group_maps[weight_idx] = group_idx;
 
-        reload_plan[num_ops].weight_idx = weight_idx;
-        reload_plan[num_ops].cache_idx  = group_idx;
-        ++num_ops;
+        reload_plan[reload_cnt].weight_idx = weight_idx;
+        reload_plan[reload_cnt].cache_idx  = group_idx;
+        ++reload_cnt;
 
         ++weight_idx;
         ++cache_idx;

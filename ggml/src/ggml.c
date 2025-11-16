@@ -954,11 +954,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
 
     "MUL_MAT",
     "MUL_MAT_ID",
-
     "MUL_MAT_SPARSE",
     "AXPY_SPARSE",
+    "RELOAD_PLAN",
     "RELOAD_EXEC",
-
     "OUT_PROD",
 
     "SCALE",
