@@ -2105,29 +2105,16 @@ static void ggml_compute_forward_axpy_sparse_pro(const struct ggml_compute_param
     // convert to same type, align precision, src1 fp32->fp16/bf16
     if (src1->type != vec_dot_type) {
         char * wdata = params->wdata;
+        GGML_ASSERT(ne12 == 1 && ne13 == 1);  // only support 2D input now
 
-        const size_t nbw0 = ggml_type_size(vec_dot_type);
-        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
-        const size_t nbw2 = nbw1 * ne11;
-        const size_t nbw3 = nbw2 * ne12;
-
-        assert(params->wsize >= ne13 * nbw3);
-        GGML_ASSERT(src1->type == GGML_TYPE_F32);
-
-        for (int64_t i13 = 0; i13 < ne13; ++i13) {
-            for (int64_t i12 = 0; i12 < ne12; ++i12) {
-                for (int64_t i11 = 0; i11 < ne11; ++i11) {
-                    size_t  bs               = ggml_blck_size(vec_dot_type);
-                    int64_t ne10_block_start = (ith * ne10 / bs) / nth;
-                    int64_t ne10_block_end   = ((ith + 1) * ne10 / bs) / nth;
-                    from_float((float *) ((char *) src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11 +
-                                          ne10_block_start * bs * nb10),
-                               (void *) (wdata + i13 * nbw3 + i12 * nbw2 + i11 * nbw1 + ne10_block_start * nbw0),
-                               (ne10_block_end - ne10_block_start) * bs);
-                }
-            }
-        }
+        int64_t ne    = ggml_nelements(src1);
+        int64_t bs    = (ne + nth - 1) / nth;
+        int64_t start = bs * ith;
+        int64_t end   = bs * (ith + 1) > ne ? ne : bs * (ith + 1);
+        from_float((float *) ((char *) src1->data + start * nb10),
+                   (void *) (wdata + start * ggml_type_size(vec_dot_type)), end - start);
     }
+    ggml_barrier(params->threadpool);
 
     char *    src0_char  = (char *) src0->data;
     void *    input      = (src1->type == vec_dot_type) ? src1->data : params->wdata;
@@ -2141,7 +2128,7 @@ static void ggml_compute_forward_axpy_sparse_pro(const struct ggml_compute_param
     // each thread process a portion of result tensor
     const int64_t ele_per_thread = (ne00 + nth - 1) / (nth);
 
-    float *       sparse_idx_row = NULL;
+    float * sparse_idx_row = NULL;
 
     // compute this thread's output slice [start, end)
     const int64_t start = ith * ele_per_thread;
