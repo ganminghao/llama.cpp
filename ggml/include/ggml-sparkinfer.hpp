@@ -7,7 +7,7 @@
 #include <future>
 #include <thread>
 
-enum sparkinfer_weight_type { SPIF_FFN_UP = 0, SPIF_FFN_GATE = 1, SPIF_FFN_DOWN = 2 };
+enum sparkinfer_weight_type { SPIF_FFN_UP = 1, SPIF_FFN_GATE, SPIF_FFN_DOWN };
 
 typedef struct {
     int n, m, g;   // neuron_count, neuron_cache_size, group_size
@@ -67,12 +67,16 @@ struct sparkinfer_layer_cache {
 
 // sparkinfer async kernel caller and io executor
 struct SingleThreadExecutor {
-    explicit SingleThreadExecutor(bool drop_on_stop = false) : drop_(drop_on_stop), stop_flag_(false) {
+    enum SparkinferWaitType { SPIF_WAIT_MUL_MAT_SPARSE = 0, SPIF_WAIT_AXPY_SPARSE };
+
+    SingleThreadExecutor() {
         worker_ = std::thread([this] { loop(); });
     }
 
     SingleThreadExecutor(const SingleThreadExecutor &)             = delete;
     SingleThreadExecutor & operator=(const SingleThreadExecutor &) = delete;
+    SingleThreadExecutor(SingleThreadExecutor &&)                  = delete;
+    SingleThreadExecutor & operator=(SingleThreadExecutor &&)      = delete;
 
     ~SingleThreadExecutor() { stop(); }
 
@@ -80,58 +84,109 @@ struct SingleThreadExecutor {
         enqueue_io(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
     }
 
-    template <class F, class... Args>
-    auto submit(F && f, Args &&... args) -> std::future<std::invoke_result_t<F, Args...>> {
+    template <class F, class... Args> auto submit(SparkinferWaitType wait_type, F && f, Args &&... args) {
         using R = std::invoke_result_t<F, Args...>;
+
         std::packaged_task<R()> task(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
         auto                    fut      = task.get_future();
         auto                    task_ptr = std::make_shared<std::packaged_task<R()>>(std::move(task));
-        enqueue([task_ptr]() { (*task_ptr)(); });
+        std::function<void()>   wrapper  = [task_ptr]() {
+            (*task_ptr)();
+        };
+
+        bool need_notify = false;
+
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            AnchorState &               anchor = anchor_ref(wait_type);
+
+            if (!anchor.has_anchor || !anchor.active) {
+                tasks_.push_back(std::move(wrapper));
+                need_notify = true;
+            } else {
+                anchor.pending.push_back(std::move(wrapper));
+            }
+        }
+
+        if (need_notify) {
+            cv_.notify_one();
+        }
+
         return fut;
     }
 
-    auto sync_with_posts() {
-        std::packaged_task<void()> task([] {});
-        auto                       fut      = task.get_future();
-        auto                       task_ptr = std::make_shared<std::packaged_task<void()>>(std::move(task));
-        enqueue_io([task_ptr] { (*task_ptr)(); });
-        return fut;
+    void make_anchor(SparkinferWaitType wait_type) {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            AnchorState &               anchor = anchor_ref(wait_type);
+
+            GGML_ASSERT(anchor.pending.empty());
+
+            anchor.has_anchor = true;
+            anchor.active     = true;
+        }
+
+        enqueue_io([this, wait_type] {
+            std::deque<std::function<void()>> to_move;
+            {
+                std::lock_guard<std::mutex> lock(mtx_);
+                AnchorState &               anchor = anchor_ref(wait_type);
+
+                to_move.swap(anchor.pending);
+                anchor.active = false;
+
+                for (auto & fn : to_move) {
+                    tasks_.push_back(std::move(fn));
+                }
+            }
+
+            if (!to_move.empty()) {
+                cv_.notify_one();
+            }
+        });
     }
 
     void stop() noexcept {
         {
             std::lock_guard<std::mutex> lock(mtx_);
-            if (stop_flag_) {
+            if (!worker_.joinable()) {
                 return;
             }
-            stop_flag_ = true;
-            if (drop_) {
-                tasks_.clear();
-                io_tasks_.clear();
-            }
+            tasks_.push_back(std::function<void()>{});
         }
         cv_.notify_one();
-        if (worker_.joinable()) {
-            worker_.join();
+        worker_.join();
+    }
+
+    struct AnchorState {
+        bool                              has_anchor = false;
+        bool                              active     = false;
+        std::deque<std::function<void()>> pending;
+    };
+
+    AnchorState anchor_mm_sparse_;
+    AnchorState anchor_axpy_sparse_;
+
+    AnchorState & anchor_ref(SparkinferWaitType wait_type) {
+        switch (wait_type) {
+            case SPIF_WAIT_MUL_MAT_SPARSE:
+                return anchor_mm_sparse_;
+            case SPIF_WAIT_AXPY_SPARSE:
+                return anchor_axpy_sparse_;
+            default:
+                GGML_ABORT("anchor_ref: invalid wait_type");
         }
     }
 
-    std::thread             worker_;
-    std::mutex              mtx_;
-    std::condition_variable cv_;
-
+    std::mutex                        mtx_;
+    std::condition_variable           cv_;
     std::deque<std::function<void()>> tasks_;
     std::deque<std::function<void()>> io_tasks_;
-
-    const bool drop_;
-    bool       stop_flag_;
+    std::thread                       worker_;
 
     void enqueue(std::function<void()> fn) {
         {
             std::lock_guard<std::mutex> lock(mtx_);
-            if (stop_flag_) {
-                throw std::runtime_error("executor stopped");
-            }
             tasks_.push_back(std::move(fn));
         }
         cv_.notify_one();
@@ -140,9 +195,6 @@ struct SingleThreadExecutor {
     void enqueue_io(std::function<void()> fn) {
         {
             std::lock_guard<std::mutex> lock(mtx_);
-            if (stop_flag_) {
-                throw std::runtime_error("executor stopped");
-            }
             io_tasks_.push_back(std::move(fn));
         }
         cv_.notify_one();
@@ -153,11 +205,7 @@ struct SingleThreadExecutor {
             std::function<void()> task;
             {
                 std::unique_lock<std::mutex> lock(mtx_);
-                cv_.wait(lock, [this] { return stop_flag_ || !tasks_.empty() || !io_tasks_.empty(); });
-
-                if (stop_flag_ && ((tasks_.empty() && io_tasks_.empty()) || drop_)) {
-                    break;
-                }
+                cv_.wait(lock, [this] { return !tasks_.empty() || !io_tasks_.empty(); });
 
                 if (!tasks_.empty()) {
                     task = std::move(tasks_.front());
@@ -169,6 +217,11 @@ struct SingleThreadExecutor {
                     continue;
                 }
             }
+
+            if (!task) {
+                break;
+            }
+
             task();
         }
     }

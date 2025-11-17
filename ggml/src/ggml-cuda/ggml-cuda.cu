@@ -2529,10 +2529,6 @@ static void sparkinfer_reload_task(char *       weight_base,
     CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
-static void sparkinfer_reload_event_record_task(ggml_backend_event_t event, cudaStream_t stream) {
-    CUDA_CHECK(cudaEventRecord((cudaEvent_t) event->context, stream));
-}
-
 static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     auto   spif_wt = static_cast<sparkinfer_weight_type>(dst->op_params[0]);
     void * obj     = nullptr;
@@ -2574,10 +2570,10 @@ static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor *
                             wnd_size, spif_lc->reload_plan);
     }
 
-    for (int k = 0; k < spif_extra->event_count; ++k) {
-        if (spif_extra->states[k] == SPIF_MANUAL) {
-            spif_executor->post(sparkinfer_reload_event_record_task, spif_extra->events[k], io_stream);
-        }
+    if (spif_wt == SPIF_FFN_UP) {
+        spif_executor->make_anchor(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_MUL_MAT_SPARSE);
+    } else if (spif_wt == SPIF_FFN_DOWN) {
+        spif_executor->make_anchor(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_AXPY_SPARSE);
     }
 }
 
@@ -3403,17 +3399,6 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
 
             for (int i = 0; i < cgraph->n_nodes; i++) {
                 ggml_tensor * node = cgraph->nodes[i];
-
-                // wait here when use SPIF_PARALLEL in sparkinfer
-                if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(node->extra); spif_extra) {
-                    for (int k = 0; k < spif_extra->event_count; ++k) {
-                        if (spif_extra->states[k] == SPIF_WAIT) {
-                            CUDA_CHECK(cudaStreamWaitEvent(cuda_ctx->stream(), (cudaEvent_t) spif_extra->events[k]->context));
-                        } else if (spif_extra->states[k] == SPIF_SYNCHRONIZE) {
-                            CUDA_CHECK(cudaEventSynchronize((cudaEvent_t) spif_extra->events[k]->context));
-                        }
-                    }
-                }
 
 #ifdef GGML_CUDA_DEBUG
                 const int nodes_fused = i - prev_i - 1;
