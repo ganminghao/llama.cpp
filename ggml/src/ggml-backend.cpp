@@ -1198,12 +1198,13 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
 
             // sparkinfer force split
             auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(node->extra);
-            if (spif_extra && spif_extra->async_split == SPIF_ASYNC_SPLIT_HEAD) {
+            if (spif_extra &&
+                (spif_extra->async_split == SPIF_SPLIT_MUL_MAT_SPARSE || spif_extra->async_split == SPIF_SPLIT_AXPY_SPARSE)) {
                 need_new_split = true;
             }
             if (i > 0) {
                 auto * spif_extra_ = static_cast<sparkinfer_tensor_extra *>(graph->nodes[i - 1]->extra);
-                if (spif_extra_ && spif_extra_->async_split == SPIF_ASYNC_SPLIT_TAIL) {
+                if (spif_extra_ && spif_extra_->async_split == SPIF_SPLIT_TAIL) {
                     need_new_split = true;
                 }
             }
@@ -1460,10 +1461,8 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
     return true;
 }
 
-static inline bool enable_spif_parallel() {
-    static const bool k_enable_spif_parallel = (std::getenv("SPIF_PARALLEL") != nullptr);
-    return k_enable_spif_parallel;
-}
+static const bool k_enable_spif_parallel = (std::getenv("SPIF_PARALLEL") != nullptr);
+static const bool k_enable_spif_split_debug = (getenv("SPIF_SPLIT_DEBUG") != nullptr);
 
 static inline sparkinfer_tensor_extra * get_extra(ggml_backend_sched_t sched, ggml_tensor * tensor) {
     if (!tensor->extra) {
@@ -1487,7 +1486,7 @@ static inline void sparkinfer_append_event(ggml_backend_sched_t        sched,
 void sparkinfer_set_node_flags(ggml_backend_sched_t       sched,
                                ggml_tensor *              tensor,
                                enum sparkinfer_node_state async_split) {
-    if (!enable_spif_parallel()) {
+    if (!k_enable_spif_parallel) {
         return;
     }
 
@@ -1501,7 +1500,10 @@ void sparkinfer_register_dependency(ggml_backend_sched_t        sched,
                                     ggml_backend_t              event_backend,
                                     enum sparkinfer_event_state src_state,
                                     enum sparkinfer_event_state dst_state) {
-    if (!enable_spif_parallel()) {
+    if (!k_enable_spif_parallel) {
+        return;
+    }
+    if (src_state == SPIF_MANUAL && !sparkinfer_layer_cache::k_enable_spif_reload) {
         return;
     }
 
@@ -1675,15 +1677,18 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                         // } else {
                         //     ggml_backend_synchronize(split_backend);
                         // }
-                        if (!enable_spif_parallel()) {
-                            ggml_backend_synchronize(input_backend);
+                        if (!k_enable_spif_parallel) {
+                            ggml_backend_synchronize(split_backend);
                             ggml_backend_tensor_copy(input, input_cpy);
                         } else {
+                            if (input_id == 0) {
+                                ggml_backend_synchronize(split_backend);
+                            }
                             if (input_id + 1 < split->n_inputs) {
-                                sched->spif_executor->submit(sparkinfer_backend_tensor_set_or_get_async, input_cpy, input->data, 0,
-                                                             ggml_nbytes(input), "set");
+                                sparkinfer_backend_tensor_set_or_get_async(input_cpy, input->data, 0,
+                                                                           ggml_nbytes(input), "set");
                             } else {
-                                sched->spif_executor->submit(ggml_backend_tensor_set, input_cpy, input->data, 0, ggml_nbytes(input)).wait();
+                                ggml_backend_tensor_set(input_cpy, input->data, 0, ggml_nbytes(input));
                             }
                         }
                     }
@@ -1691,8 +1696,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
-        static const bool enable_split_debug = (getenv("SPIF_SPLIT_DEBUG") != nullptr);
-        if (enable_split_debug) {
+        if (k_enable_spif_split_debug) {
             printf("\n SPLIT %d: backend: %d %s # %d inputs\n", split_id, split_backend_id,
                    ggml_backend_name(split_backend), split->n_inputs);
             for (int input_id = 0; input_id < split->n_inputs; input_id++) {
@@ -1709,18 +1713,23 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     if (src == NULL) {
                         continue;
                     }
-                    printf("src %d: %s {%ld, %ld} %s, ", k, src->name, src->ne[0], src->ne[1], ggml_type_name(src->type));
+                    printf("src %d: %s {%ld, %ld} %s, ", k, src->name, src->ne[0], src->ne[1],
+                           ggml_type_name(src->type));
                 }
                 printf("\n");
             }
         }
 
         if (!sched->callback_eval) {
-            if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(split->graph.nodes[0]->extra);
-                spif_extra && spif_extra->async_split == SPIF_ASYNC_SPLIT_HEAD &&
-                ggml_backend_dev_type(sched->backends[splits[split_id + 1].backend_id]->device) == GGML_BACKEND_DEVICE_TYPE_CPU) {
-                sched->spif_executor->sync_with_posts().wait(); // TODO: ???
-                split_fut = sched->spif_executor->submit(ggml_backend_graph_compute_async, split_backend, &split->graph);
+            auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(split->graph.nodes[0]->extra);
+            if (spif_extra && spif_extra->async_split == SPIF_SPLIT_MUL_MAT_SPARSE) {
+                split_fut =
+                    sched->spif_executor->submit(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_MUL_MAT_SPARSE,
+                                                 ggml_backend_graph_compute_async, split_backend, &split->graph);
+            } else if (spif_extra && spif_extra->async_split == SPIF_SPLIT_AXPY_SPARSE) {
+                split_fut =
+                    sched->spif_executor->submit(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_AXPY_SPARSE,
+                                                 ggml_backend_graph_compute_async, split_backend, &split->graph);
             } else {
                 enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
                 if (ec != GGML_STATUS_SUCCESS) {
@@ -1789,7 +1798,7 @@ ggml_backend_sched_t ggml_backend_sched_new(
     sched->debug = GGML_SCHED_DEBUG ? atoi(GGML_SCHED_DEBUG) : 0;
     sched->n_backends = n_backends;
     sched->n_copies = parallel ? GGML_SCHED_MAX_COPIES : 1;
-    if (enable_spif_parallel()) {
+    if (k_enable_spif_parallel) {
         sched->spif_events = std::make_unique<std::unordered_map<std::string, ggml_backend_event_t>>();
         sched->spif_executor = std::make_unique<SingleThreadExecutor>();
     }

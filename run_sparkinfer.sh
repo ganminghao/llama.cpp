@@ -10,7 +10,7 @@ inference_opts=(
     -m $model
     -spif-ms $model_split
     -cffn --no-mmap -ngl 999 -t 4
-    --samplers "temperature;top_p" --temp 0.8 --top-p 0.95 -s 1234
+    --samplers "temperature;top_p" --temp 0.8 --top-p 0.95 -s 512
     -p "$prompt" -n 128 -no-cnv
     --no-warmup
 )

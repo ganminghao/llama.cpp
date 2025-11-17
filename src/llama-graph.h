@@ -655,14 +655,6 @@ struct llm_graph_context {
              ggml_tensor * pred_down_b,
                      int   il) const;
 
-    void build_predictor_and_reload(
-                    ggml_tensor * cur,
-                    ggml_tensor * inp_out_ids,
-              const llama_layer * layer,
-         sparkinfer_layer_cache * spif_lc,
-                           bool   gpu_only,
-                            int   il) const;
-
     ggml_tensor * build_sparse_ffn(
                    ggml_tensor * cur,
                    ggml_tensor * inp_out_ids,
