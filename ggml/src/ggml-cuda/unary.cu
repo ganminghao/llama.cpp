@@ -605,3 +605,48 @@ void ggml_cuda_op_fatrelu(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         fatrelu_cuda((const float *)src0_d, (float *)dst_d, ggml_nelements(src0), threshold, stream);
     }
 }
+
+/* shifted_step */
+
+static __device__ __forceinline__ float op_shifted_step(float x, const float threshold) {
+    return (x + threshold) > 0.0f;
+}
+
+template <class T>
+static __global__ void shifted_step_kernel(const T * x, T * dst, const int k, const float threshold) {
+    const int i  = blockDim.x*blockIdx.x + threadIdx.x;
+
+    if (i >= k) {
+        return;
+    }
+
+    dst[i] = (T)op_shifted_step((float)x[i], threshold);
+}
+
+template <class T>
+static void shifted_step_cuda(const T * x, T * dst, const int k, const float threshold, cudaStream_t stream) {
+    const int num_blocks = (k + CUDA_RELU_BLOCK_SIZE - 1) / CUDA_RELU_BLOCK_SIZE;
+    shifted_step_kernel<<<num_blocks, CUDA_RELU_BLOCK_SIZE, 0, stream>>>(x, dst, k, threshold);
+}
+
+void ggml_cuda_op_shifted_step(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const void * src0_d = src0->data;
+    void * dst_d = dst->data;
+    cudaStream_t stream = ctx.stream();
+
+    GGML_ASSERT(ggml_is_contiguous(src0));
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
+    GGML_ASSERT( dst->type == GGML_TYPE_F32 ||  dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(src0->type == dst->type);
+
+    float threshold;
+    memcpy(&threshold, dst->op_params, sizeof(float));
+
+    if (src0->type == GGML_TYPE_F16) {
+        shifted_step_cuda((const half *)src0_d, (half *)dst_d, ggml_nelements(src0), threshold, stream);
+    } else {
+        shifted_step_cuda((const float *)src0_d, (float *)dst_d, ggml_nelements(src0), threshold, stream);
+    }
+}
