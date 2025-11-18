@@ -23,6 +23,12 @@ static __device__ __forceinline__ float op_div(const float a, const float b) {
     return a / b;
 }
 
+__device__ __constant__ float sparkinfer_dfr_decay = 1.0f;
+
+static __device__ __forceinline__ float op_scale_add(const float a, const float b) {
+    return sparkinfer_dfr_decay * a + b;
+}
+
 static __device__ __forceinline__ float op_xor(const float a, const float b) {
     return __int2float_rz(__float2int_rz(a) ^ __float2int_rz(b));
 }
@@ -414,6 +420,16 @@ void ggml_cuda_op_mul(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
 void ggml_cuda_op_div(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_div>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
+}
+
+void ggml_cuda_op_scale_add(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    static bool dfr_decay_initialized = false;
+    if (!dfr_decay_initialized) {
+        CUDA_CHECK(cudaMemcpyToSymbolAsync(sparkinfer_dfr_decay, &dst->op_params, sizeof(float), 0, cudaMemcpyHostToDevice, ctx.stream()));
+        dfr_decay_initialized = true;
+    }
+
+    ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_scale_add>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
 }
 
 void ggml_cuda_op_xor(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

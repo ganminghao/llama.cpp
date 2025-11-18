@@ -340,21 +340,21 @@ extern "C" {
     GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
 
     // Sparkinfer: data structures and functions used in SPIF_PARALLEL
-    enum sparkinfer_event_state { SPIF_MANUAL = 1, SPIF_RECORD, SPIF_WAIT, SPIF_SYNCHRONIZE };
+    enum sparkinfer_event_state { SPIF_EVENT_RECORD = 1, SPIF_EVENT_WAIT, SPIF_EVENT_SYNCHRONIZE, SPIF_EVENT_MANUAL };
 
-    enum sparkinfer_node_state { SPIF_SPLIT_MUL_MAT_SPARSE = 1, SPIF_SPLIT_AXPY_SPARSE, SPIF_SPLIT_TAIL };
+    enum sparkinfer_split_flag { SPIF_SPLIT_MUL_MAT_SPARSE = 1, SPIF_SPLIT_AXPY_SPARSE, SPIF_SPLIT_TAIL };
 
     typedef struct sparkinfer_tensor_extra {
         enum sparkinfer_event_state states[GGML_MAX_SRC];
         ggml_backend_event_t        events[GGML_MAX_SRC];
         int                         event_count;
-        enum sparkinfer_node_state  async_split;
+        enum sparkinfer_split_flag  split_flag;
         void *                      spif_executor;
     } sparkinfer_tensor_extra;
 
     GGML_API void sparkinfer_register_dependency(ggml_backend_sched_t sched, struct ggml_tensor * src, struct ggml_tensor * dst, ggml_backend_t event_backend, enum sparkinfer_event_state src_state, enum sparkinfer_event_state dst_state);
 
-    GGML_API void sparkinfer_set_node_flags(ggml_backend_sched_t sched, struct ggml_tensor * tensor, enum sparkinfer_node_state async_split);
+    GGML_API void sparkinfer_set_node_state(ggml_backend_sched_t sched, struct ggml_tensor * tensor, enum sparkinfer_split_flag split_flag);
 
     //
     // Utils

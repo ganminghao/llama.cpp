@@ -9,7 +9,8 @@
 #include <cstring>
 #include <numeric>
 
-const bool sparkinfer_layer_cache::k_enable_spif_reload = (getenv("SPIF_RELOAD") != nullptr);
+const bool sparkinfer_layer_cache::k_enable_spif_reload =
+    (getenv("SPIF_PARALLEL") != nullptr && getenv("SPIF_RELOAD") != nullptr);
 
 ggml_tensor * sparkinfer_layer_cache::build_reload_plan(ggml_context * ctx0,
                                                         ggml_tensor *  weight_only,
