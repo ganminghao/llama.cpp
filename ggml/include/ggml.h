@@ -468,6 +468,7 @@ extern "C" {
         GGML_OP_SUB,
         GGML_OP_MUL,
         GGML_OP_DIV,
+        GGML_OP_SCALE_ADD,
         GGML_OP_XOR,
         GGML_OP_AND,
         GGML_OP_SQR,
@@ -540,6 +541,7 @@ extern "C" {
         GGML_OP_TOP_K,
         GGML_OP_LEAKY_RELU,
         GGML_OP_FATRELU,
+        GGML_OP_SHIFTED_STEP,
         GGML_OP_TRI,
         GGML_OP_FILL,
 
@@ -955,6 +957,11 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
 
+    GGML_API struct ggml_tensor * ggml_scale_add(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b, float scale, bool inplace);
+
     GGML_API struct ggml_tensor * ggml_xor(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
@@ -1143,6 +1150,10 @@ extern "C" {
             struct ggml_tensor  * a, float negative_slope, bool inplace);
 
     GGML_API struct ggml_tensor * ggml_fatrelu(
+            struct ggml_context * ctx,
+            struct ggml_tensor * a, float threshold, bool inplace);
+
+    GGML_API struct ggml_tensor * ggml_shifted_step(
             struct ggml_context * ctx,
             struct ggml_tensor * a, float threshold, bool inplace);
 

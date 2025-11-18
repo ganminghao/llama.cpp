@@ -928,6 +928,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "SUB",
     "MUL",
     "DIV",
+    "SCALE_ADD",
     "XOR",
     "AND",
     "SQR",
@@ -1000,6 +1001,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "TOP_K",
     "LEAKY_RELU",
     "FATRELU",
+    "SHIFTED_STEP",
     "TRI",
     "FILL",
 
@@ -1032,7 +1034,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -2198,6 +2200,25 @@ struct ggml_tensor * ggml_div_inplace(
     return ggml_div_impl(ctx, a, b, true);
 }
 
+// ggml_scale_add
+
+struct ggml_tensor * ggml_scale_add(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b,
+        float                 scale,
+        bool                  inplace) {
+    struct ggml_tensor * result = inplace ? ggml_view_tensor(ctx, a) : ggml_dup_tensor(ctx, a);
+
+    ggml_set_op_params(result, &scale, sizeof(scale));
+
+    result->op     = GGML_OP_SCALE_ADD;
+    result->src[0] = a;
+    result->src[1] = b;
+
+    return result;
+}
+
 // ggml bitwise xor(^)
 
 struct ggml_tensor * ggml_xor(
@@ -2711,6 +2732,23 @@ struct ggml_tensor * ggml_fatrelu(
     ggml_set_op_params(result, &threshold, sizeof(threshold));
 
     result->op     = GGML_OP_FATRELU;
+    result->src[0] = a;
+
+    return result;
+}
+
+// ggml_shifted_step
+
+struct ggml_tensor * ggml_shifted_step(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        float                 threshold,
+        bool                  inplace) {
+    struct ggml_tensor * result = inplace ? ggml_view_tensor(ctx, a) : ggml_dup_tensor(ctx, a);
+
+    ggml_set_op_params(result, &threshold, sizeof(threshold));
+
+    result->op     = GGML_OP_SHIFTED_STEP;
     result->src[0] = a;
 
     return result;

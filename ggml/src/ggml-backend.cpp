@@ -1199,12 +1199,12 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
             // sparkinfer force split
             auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(node->extra);
             if (spif_extra &&
-                (spif_extra->async_split == SPIF_SPLIT_MUL_MAT_SPARSE || spif_extra->async_split == SPIF_SPLIT_AXPY_SPARSE)) {
+                (spif_extra->split_flag == SPIF_SPLIT_MUL_MAT_SPARSE || spif_extra->split_flag == SPIF_SPLIT_AXPY_SPARSE)) {
                 need_new_split = true;
             }
             if (i > 0) {
                 auto * spif_extra_ = static_cast<sparkinfer_tensor_extra *>(graph->nodes[i - 1]->extra);
-                if (spif_extra_ && spif_extra_->async_split == SPIF_SPLIT_TAIL) {
+                if (spif_extra_ && spif_extra_->split_flag == SPIF_SPLIT_TAIL) {
                     need_new_split = true;
                 }
             }
@@ -1483,15 +1483,15 @@ static inline void sparkinfer_append_event(ggml_backend_sched_t        sched,
     spif_extra->events[spif_extra->event_count++] = event;
 }
 
-void sparkinfer_set_node_flags(ggml_backend_sched_t       sched,
+void sparkinfer_set_node_state(ggml_backend_sched_t       sched,
                                ggml_tensor *              tensor,
-                               enum sparkinfer_node_state async_split) {
+                               enum sparkinfer_split_flag split_flag) {
     if (!k_enable_spif_parallel) {
         return;
     }
 
-    auto * spif_extra       = get_extra(sched, tensor);
-    spif_extra->async_split = async_split;
+    auto * spif_extra      = get_extra(sched, tensor);
+    spif_extra->split_flag = split_flag;
 }
 
 void sparkinfer_register_dependency(ggml_backend_sched_t        sched,
@@ -1503,7 +1503,7 @@ void sparkinfer_register_dependency(ggml_backend_sched_t        sched,
     if (!k_enable_spif_parallel) {
         return;
     }
-    if (src_state == SPIF_MANUAL && !sparkinfer_layer_cache::k_enable_spif_reload) {
+    if (src_state == SPIF_EVENT_MANUAL && !sparkinfer_layer_cache::k_enable_spif_reload) {
         return;
     }
 
@@ -1544,7 +1544,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             for (int node_id = 0; node_id < split->graph.n_nodes; ++node_id) {
                 if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(split->graph.nodes[node_id]->extra); spif_extra) {
                     for (int k = 0; k < spif_extra->event_count; ++k) {
-                        if (spif_extra->states[k] == SPIF_SYNCHRONIZE) {
+                        if (spif_extra->states[k] == SPIF_EVENT_SYNCHRONIZE) {
                             ggml_backend_event_synchronize(spif_extra->events[k]);
                         }
                     }
@@ -1678,6 +1678,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                         //     ggml_backend_synchronize(split_backend);
                         // }
                         if (!k_enable_spif_parallel) {
+                            ggml_backend_synchronize(input_backend);
                             ggml_backend_synchronize(split_backend);
                             ggml_backend_tensor_copy(input, input_cpy);
                         } else {
@@ -1722,11 +1723,11 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
         if (!sched->callback_eval) {
             auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(split->graph.nodes[0]->extra);
-            if (spif_extra && spif_extra->async_split == SPIF_SPLIT_MUL_MAT_SPARSE) {
+            if (spif_extra && spif_extra->split_flag == SPIF_SPLIT_MUL_MAT_SPARSE) {
                 split_fut =
                     sched->spif_executor->submit(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_MUL_MAT_SPARSE,
                                                  ggml_backend_graph_compute_async, split_backend, &split->graph);
-            } else if (spif_extra && spif_extra->async_split == SPIF_SPLIT_AXPY_SPARSE) {
+            } else if (spif_extra && spif_extra->split_flag == SPIF_SPLIT_AXPY_SPARSE) {
                 split_fut =
                     sched->spif_executor->submit(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_AXPY_SPARSE,
                                                  ggml_backend_graph_compute_async, split_backend, &split->graph);
