@@ -2635,6 +2635,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_DIV:
             ggml_cuda_op_div(ctx, dst);
             break;
+        case GGML_OP_SCALE_ADD:
+            ggml_cuda_op_scale_add(ctx, dst);
+            break;
         case GGML_OP_XOR:
             ggml_cuda_op_xor(ctx, dst);
             break;
@@ -2769,6 +2772,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_FATRELU:
             ggml_cuda_op_fatrelu(ctx, dst);
+            break;
+        case GGML_OP_SHIFTED_STEP:
+            ggml_cuda_op_shifted_step(ctx, dst);
             break;
         case GGML_OP_SILU_BACK:
             ggml_cuda_op_silu_back(ctx, dst);
@@ -3676,7 +3682,7 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                         for (int j = 0; j <= 2; ++j) {
                             if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(cgraph->nodes[i + j]->extra); spif_extra) {
                                 for (int k = 0; k < spif_extra->event_count; ++k) {
-                                    if (spif_extra->states[k] == SPIF_RECORD) {
+                                    if (spif_extra->states[k] == SPIF_EVENT_RECORD) {
                                         CUDA_CHECK(cudaEventRecord((cudaEvent_t) spif_extra->events[k]->context, cuda_ctx->stream()));
                                     }
                                 }
@@ -3691,7 +3697,7 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                         for (int j = 0; j <= 1; ++j) {
                             if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(cgraph->nodes[i + j]->extra); spif_extra) {
                                 for (int k = 0; k < spif_extra->event_count; ++k) {
-                                    if (spif_extra->states[k] == SPIF_RECORD) {
+                                    if (spif_extra->states[k] == SPIF_EVENT_RECORD) {
                                         CUDA_CHECK(cudaEventRecord((cudaEvent_t) spif_extra->events[k]->context, cuda_ctx->stream()));
                                     }
                                 }
@@ -3735,7 +3741,7 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                 // record here (and above in kernel fusion) when use SPIF_PARALLEL in sparkinfer
                 if (auto * spif_extra = static_cast<sparkinfer_tensor_extra *>(node->extra); spif_extra) {
                     for (int k = 0; k < spif_extra->event_count; ++k) {
-                        if (spif_extra->states[k] == SPIF_RECORD) {
+                        if (spif_extra->states[k] == SPIF_EVENT_RECORD) {
                             CUDA_CHECK(cudaEventRecord((cudaEvent_t) spif_extra->events[k]->context, cuda_ctx->stream()));
                         }
                     }
@@ -4408,6 +4414,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_SUB:
         case GGML_OP_MUL:
         case GGML_OP_DIV:
+        case GGML_OP_SCALE_ADD:
         case GGML_OP_XOR:
         case GGML_OP_AND:
         case GGML_OP_SCALE:
@@ -4481,6 +4488,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_TIMESTEP_EMBEDDING:
         case GGML_OP_LEAKY_RELU:
         case GGML_OP_FATRELU:
+        case GGML_OP_SHIFTED_STEP:
         case GGML_OP_RWKV_WKV6:
         case GGML_OP_GATED_LINEAR_ATTN:
         case GGML_OP_RWKV_WKV7:
