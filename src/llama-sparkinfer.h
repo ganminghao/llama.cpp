@@ -13,7 +13,7 @@ struct sparkinfer_cache_manager {
     ggml_backend_buffer_t buf_cpu     = nullptr;
     ggml_backend_buffer_t buf_gpu     = nullptr;
 
-    float         dfr_decay    = 0.75f;
+    float         dfr_decay    = 0.5f;
     bool          is_gated_mlp = false;
     ggml_tensor * identity     = nullptr;
 
