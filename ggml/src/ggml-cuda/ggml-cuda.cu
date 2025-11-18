@@ -2511,13 +2511,19 @@ static void ggml_cuda_reload_plan(ggml_backend_cuda_context & ctx, ggml_tensor *
     CUDA_CHECK(cudaStreamSynchronize(main_stream));
 }
 
-static void sparkinfer_reload_task(char *       weight_base,
-                                   char *       cache_base,
-                                   size_t       nbytes,
-                                   cudaStream_t stream,
-                                   size_t       wnd_offset,
-                                   size_t       wnd_size,
-                                   copy_pair *  reload_plan) {
+static void sparkinfer_reload_task(ggml_tensor * dst,
+                                   char *        weight_base,
+                                   char *        cache_base,
+                                   size_t        nbytes,
+                                   cudaStream_t  stream,
+                                   size_t        wnd_offset,
+                                   size_t        wnd_size,
+                                   copy_pair *   reload_plan) {
+#ifdef USE_NVTX
+    nvtxRangeId_t id = nvtx_init(-1, dst->name, "CUDA");
+#else
+    GGML_UNUSED(dst);
+#endif
     char * weight_ptr = nullptr;
     char * cache_ptr  = nullptr;
     for (size_t i = 0; i < wnd_size; ++i) {
@@ -2526,6 +2532,9 @@ static void sparkinfer_reload_task(char *       weight_base,
         CUDA_CHECK(cudaMemcpyAsync(cache_ptr, weight_ptr, nbytes, cudaMemcpyHostToDevice, stream));
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
+#ifdef USE_NVTX
+    nvtxRangeEnd(id);
+#endif
 }
 
 static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -2565,7 +2574,7 @@ static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor *
     auto * spif_executor = static_cast<SingleThreadExecutor *>(spif_extra->spif_executor);
     for (size_t wnd_offset = 0; wnd_offset < spif_lc->reload_cnt; wnd_offset += spif_lc->reload_wnd_size) {
         size_t wnd_size = MIN(spif_lc->reload_wnd_size, spif_lc->reload_cnt - wnd_offset);
-        spif_executor->post(sparkinfer_reload_task, weight_base, cache_base, grp_nbytes, io_stream, wnd_offset,
+        spif_executor->post(sparkinfer_reload_task, dst, weight_base, cache_base, grp_nbytes, io_stream, wnd_offset,
                             wnd_size, spif_lc->reload_plan);
     }
 

@@ -203,6 +203,15 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
     gguf_free(ctx_gguf);
     ggml_free(ctx_meta);
 
+    std::vector<float> f32_mat_buf(layer_group_count * layer_group_count);
+    for (int i = 0; i < layer_group_count; ++i) {
+        f32_mat_buf[i * layer_group_count + i] = 1.0f;
+    }
+    ggml_backend_tensor_set(identity, f32_mat_buf.data(), 0, ggml_nbytes(identity));
+
+    std::vector<uint8_t> src_mat_buf(ggml_nbytes(layer_caches[0]->layer_ffn_up));
+    std::vector<uint8_t> dst_mat_buf(ggml_nbytes(layer_caches[0]->layer_ffn_up));
+
     auto reorder_tensor_2d = [&](ggml_tensor * tensor, std::vector<int64_t> & perm) {
         const auto n_cols        = tensor->ne[0];
         const auto n_rows        = ggml_nrows(tensor);
@@ -210,15 +219,12 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         const auto row_stride    = tensor->nb[1];
         const auto tensor_nbytes = ggml_nbytes(tensor);
 
-        std::vector<uint8_t> src_buf(tensor_nbytes);
-        std::vector<uint8_t> dst_buf(tensor_nbytes);
-        ggml_backend_tensor_get(tensor, src_buf.data(), 0, tensor_nbytes);
-        std::memcpy(dst_buf.data(), src_buf.data(), tensor_nbytes);
+        ggml_backend_tensor_get(tensor, src_mat_buf.data(), 0, tensor_nbytes);
         for (int new_row = 0; new_row < n_rows; ++new_row) {
             const auto old_row = perm[new_row];
-            std::memcpy(dst_buf.data() + new_row * row_stride, src_buf.data() + old_row * row_stride, row_size);
+            memcpy(dst_mat_buf.data() + new_row * row_stride, src_mat_buf.data() + old_row * row_stride, row_size);
         }
-        ggml_backend_tensor_set(tensor, dst_buf.data(), 0, tensor_nbytes);
+        ggml_backend_tensor_set(tensor, dst_mat_buf.data(), 0, tensor_nbytes);
     };
     auto reorder_tensor_1d = [&](ggml_tensor * tensor, std::vector<int64_t> & perm) {
         const auto n_elem        = tensor->ne[0];
@@ -229,10 +235,9 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         std::vector<uint8_t> src_buf(tensor_nbytes);
         std::vector<uint8_t> dst_buf(tensor_nbytes);
         ggml_backend_tensor_get(tensor, src_buf.data(), 0, tensor_nbytes);
-        std::memcpy(dst_buf.data(), src_buf.data(), tensor_nbytes);
         for (int new_i = 0; new_i < n_elem; ++new_i) {
             const auto old_i = perm[new_i];
-            std::memcpy(dst_buf.data() + new_i * elem_stride, src_buf.data() + old_i * elem_stride, elem_size);
+            memcpy(dst_buf.data() + new_i * elem_stride, src_buf.data() + old_i * elem_stride, elem_size);
         }
         ggml_backend_tensor_set(tensor, dst_buf.data(), 0, tensor_nbytes);
     };
@@ -247,12 +252,6 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
             }
         }
     };
-
-    std::vector<float> f32_group_buf(layer_group_count * layer_group_count);
-    for (int i = 0; i < layer_group_count; ++i) {
-        f32_group_buf[i * layer_group_count + i] = 1.0f;
-    }
-    ggml_backend_tensor_set(identity, f32_group_buf.data(), 0, ggml_nbytes(identity));
 
     float total_cache_n_mega_bytes = 0.0;
     for (uint32_t il = 0; il < n_layer; ++il) {
