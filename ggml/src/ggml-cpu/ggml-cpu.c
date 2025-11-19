@@ -2083,9 +2083,14 @@ static void ggml_compute_forward_axpy_sparse_pro(const struct ggml_compute_param
     const int nth = params->nth;
 
     // zero the dst buffer once
-    if (ith == 0) {
-        memset(dst->data, 0, ggml_nelements(dst) * sizeof(float));
+    int ele_per_thread_zero = (ggml_nelements(dst) + nth - 1) / nth;
+    int start_zero          = ith * ele_per_thread_zero;
+    int end_zero            = start_zero + ele_per_thread_zero;
+    if (end_zero > ggml_nelements(dst)) {
+        end_zero = ggml_nelements(dst);
     }
+
+    memset((float *) dst->data + start_zero, 0, (end_zero - start_zero) * sizeof(float));
     ggml_barrier(params->threadpool);
 
     enum ggml_type const    vec_dot_type = type_traits_cpu[src0->type].vec_dot_type;
@@ -2126,9 +2131,12 @@ static void ggml_compute_forward_axpy_sparse_pro(const struct ggml_compute_param
     const int64_t token_len_char = ggml_type_size(vec_dot_type) * ne10;
 
     // each thread process a portion of result tensor
-    const int64_t ele_per_thread = (ne00 + nth - 1) / (nth);
+    int64_t ele_per_thread = (ne00 + nth - 1) / (nth);
 
-    float * sparse_idx_row = NULL;
+    // we make sure the chunk size is multiple of cache line size to avoid false sharing
+    const int64_t ele_per_CL = CACHE_LINE_SIZE / sizeof(float);
+    const int64_t n_CL       = (ele_per_thread + ele_per_CL - 1) / ele_per_CL;
+    ele_per_thread           = n_CL * ele_per_CL;
 
     // compute this thread's output slice [start, end)
     const int64_t start = ith * ele_per_thread;
@@ -2143,6 +2151,7 @@ static void ggml_compute_forward_axpy_sparse_pro(const struct ggml_compute_param
     // We'll iterate neurons (0..ne01-1) outer, tokens inner:
     // for each neuron: load pointer to its weights row, offset by `start`
     // for each token: read alpha and do axpy on dst[token][start..end)
+    float * sparse_idx_row = NULL;
     for (int64_t neu_i = 0; neu_i < ne01; ++neu_i) {
         if (cpu_mask[neu_i] == 1) {
             continue;  // neuron masked out globally

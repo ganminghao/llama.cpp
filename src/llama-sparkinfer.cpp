@@ -1,5 +1,3 @@
-#define N_GPU_ONLY 8
-
 #include "llama-sparkinfer.h"
 
 #include "ggml-cuda.h"
@@ -8,6 +6,8 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
+
+const static int k_gpu_only = get_env_int("GPU_ONLY", 8);
 
 const bool sparkinfer_layer_cache::k_enable_spif_reload =
     (getenv("SPIF_PARALLEL") != nullptr && getenv("SPIF_RELOAD") != nullptr);
@@ -119,9 +119,9 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
     auto layer_cache_sizes = std::vector<int>(cache_sizes_from_gguf, cache_sizes_from_gguf + n_layer);
     auto cache_sizes_idx   = std::vector<int>(n_layer);
     std::iota(cache_sizes_idx.begin(), cache_sizes_idx.end(), 0);
-    std::nth_element(cache_sizes_idx.begin(), cache_sizes_idx.begin() + N_GPU_ONLY, cache_sizes_idx.end(),
+    std::nth_element(cache_sizes_idx.begin(), cache_sizes_idx.begin() + k_gpu_only, cache_sizes_idx.end(),
                      [&](int i, int j) { return cache_sizes_from_gguf[i] > cache_sizes_from_gguf[j]; });
-    std::for_each(cache_sizes_idx.begin(), cache_sizes_idx.begin() + N_GPU_ONLY,
+    std::for_each(cache_sizes_idx.begin(), cache_sizes_idx.begin() + k_gpu_only,
                   [&](int i) { layer_cache_sizes[i] = layer_neuron_count; });
     auto neuron_maps = std::vector<ggml_tensor *>(n_layer);
 
