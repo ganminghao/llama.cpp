@@ -3,9 +3,7 @@
 #include "ggml.h"
 
 #include <deque>
-#include <functional>
 #include <future>
-#include <thread>
 
 enum sparkinfer_weight_type { SPIF_FFN_UP = 1, SPIF_FFN_GATE, SPIF_FFN_DOWN };
 
@@ -80,31 +78,41 @@ struct SingleThreadExecutor {
 
     ~SingleThreadExecutor() { stop(); }
 
+    template <class F, class... Args> static auto make_bound(F && f, Args &&... args) {
+        using Fn  = std::decay_t<F>;
+        using Tup = std::tuple<std::decay_t<Args>...>;
+
+        return [fn = Fn(std::forward<F>(f)), tup = Tup(std::forward<Args>(args)...)]() mutable {
+            return std::apply(fn, tup);
+        };
+    }
+
     template <class F, class... Args> void post(F && f, Args &&... args) {
-        enqueue_io(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+        auto bound = make_bound(std::forward<F>(f), std::forward<Args>(args)...);
+        enqueue_io(std::move(bound));
     }
 
     template <class F, class... Args> auto submit(SparkinferWaitType wait_type, F && f, Args &&... args) {
         using R = std::invoke_result_t<F, Args...>;
 
-        std::packaged_task<R()> task(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
-        auto                    fut      = task.get_future();
-        auto                    task_ptr = std::make_shared<std::packaged_task<R()>>(std::move(task));
-        std::function<void()>   wrapper  = [task_ptr]() {
+        auto bound    = make_bound(std::forward<F>(f), std::forward<Args>(args)...);
+        auto task_ptr = std::make_shared<std::packaged_task<R()>>(std::move(bound));
+        auto fut      = task_ptr->get_future();
+        auto wrapper  = [task_ptr]() {
             (*task_ptr)();
         };
 
-        bool need_notify = false;
+        bool          need_notify = false;
+        AnchorState * anchor      = anchor_ref(wait_type);
 
         {
             std::lock_guard<std::mutex> lock(mtx_);
-            AnchorState &               anchor = anchor_ref(wait_type);
 
-            if (!anchor.has_anchor || !anchor.active) {
-                tasks_.push_back(std::move(wrapper));
+            if (!anchor->has_anchor || !anchor->active) {
+                tasks_.emplace_back(std::move(wrapper));
                 need_notify = true;
             } else {
-                anchor.pending.push_back(std::move(wrapper));
+                anchor->pending.emplace_back(std::move(wrapper));
             }
         }
 
@@ -116,27 +124,24 @@ struct SingleThreadExecutor {
     }
 
     void make_anchor(SparkinferWaitType wait_type) {
+        AnchorState * anchor = anchor_ref(wait_type);
+
         {
             std::lock_guard<std::mutex> lock(mtx_);
-            AnchorState &               anchor = anchor_ref(wait_type);
-
-            GGML_ASSERT(anchor.pending.empty());
-
-            anchor.has_anchor = true;
-            anchor.active     = true;
+            GGML_ASSERT(anchor->pending.empty());
+            anchor->has_anchor = true;
+            anchor->active     = true;
         }
 
-        enqueue_io([this, wait_type] {
+        enqueue_io([this, anchor] {
             std::deque<std::function<void()>> to_move;
             {
                 std::lock_guard<std::mutex> lock(mtx_);
-                AnchorState &               anchor = anchor_ref(wait_type);
-
-                to_move.swap(anchor.pending);
-                anchor.active = false;
+                to_move.swap(anchor->pending);
+                anchor->active = false;
 
                 for (auto & fn : to_move) {
-                    tasks_.push_back(std::move(fn));
+                    tasks_.emplace_back(std::move(fn));
                 }
             }
 
@@ -147,15 +152,19 @@ struct SingleThreadExecutor {
     }
 
     void stop() noexcept {
+        std::thread worker_to_join;
         {
             std::lock_guard<std::mutex> lock(mtx_);
             if (!worker_.joinable()) {
                 return;
             }
-            tasks_.push_back(std::function<void()>{});
+            tasks_.emplace_back(std::function<void()>{});
+            worker_to_join = std::move(worker_);
         }
         cv_.notify_one();
-        worker_.join();
+        if (worker_to_join.joinable()) {
+            worker_to_join.join();
+        }
     }
 
     struct AnchorState {
@@ -167,12 +176,12 @@ struct SingleThreadExecutor {
     AnchorState anchor_mm_sparse_;
     AnchorState anchor_axpy_sparse_;
 
-    AnchorState & anchor_ref(SparkinferWaitType wait_type) {
+    AnchorState * anchor_ref(SparkinferWaitType wait_type) {
         switch (wait_type) {
             case SPIF_WAIT_MUL_MAT_SPARSE:
-                return anchor_mm_sparse_;
+                return &anchor_mm_sparse_;
             case SPIF_WAIT_AXPY_SPARSE:
-                return anchor_axpy_sparse_;
+                return &anchor_axpy_sparse_;
             default:
                 GGML_ABORT("anchor_ref: invalid wait_type");
         }
@@ -184,18 +193,18 @@ struct SingleThreadExecutor {
     std::deque<std::function<void()>> io_tasks_;
     std::thread                       worker_;
 
-    void enqueue(std::function<void()> fn) {
+    template <class F> void enqueue(F && fn) {
         {
             std::lock_guard<std::mutex> lock(mtx_);
-            tasks_.push_back(std::move(fn));
+            tasks_.emplace_back(std::forward<F>(fn));
         }
         cv_.notify_one();
     }
 
-    void enqueue_io(std::function<void()> fn) {
+    template <class F> void enqueue_io(F && fn) {
         {
             std::lock_guard<std::mutex> lock(mtx_);
-            io_tasks_.push_back(std::move(fn));
+            io_tasks_.emplace_back(std::forward<F>(fn));
         }
         cv_.notify_one();
     }

@@ -2,38 +2,81 @@
 
 export CUDA_VISIBLE_DEVICES=0
 
+export GPU_ONLY=8
+export DFR_DECAY=69
+
+export SPIF_REORDER=ON
+export SPIF_PARALLEL=ON
+export SPIF_RELOAD=ON
+# export FAST_AXPY=ON
+
 draft_model="../Llama-160M-Chat-v1.gguf"
 model="../prosparse-llama-2-7b.gguf"
 model_split="../prosparse-llama-2-7b-sparkinfer-model-split.gguf"
 prompt="Bubble sort algorithm in python:"
 
-inference_opts=(
-    -md $draft_model
-    -m $model
-    -spif-ms $model_split
-    -cffn --no-mmap -ngld 999 -ngl 999 -t 4 -co
-    --samplers "temperature;top_p" --temp 0.8 --top-p 0.95 -s 512
-    --draft-min 3 --draft-max 5 --draft-p-min 0.5
-    -p "$prompt" -n 128
+threads=4
+seed=1234
+max_tokens=128
+
+common_opts=(
+    -spif-ms "$model_split"
+    -cffn --no-mmap
+    -t "$threads"
+    -s "$seed"
+    -p "$prompt"
+    -n "$max_tokens"
 )
 
-release_bin="./build_rel/bin/llama-speculative"
-debug_bin="./build/bin/llama-speculative"
+cli_opts=(
+    -m "$model" -ngl 999
+)
 
-if [[ ${1-} == "release" ]]; then
-    bin="$release_bin"
-elif [[ ${1-} == "debug" ]]; then
-    bin="$debug_bin"
-else
-    echo "usage: $0 [release|debug] [nvtx]"
-    echo "example:"
-    echo "  $0 debug"
-    echo "  $0 release nvtx"
+speculative_opts=(
+    -md "$draft_model" -m "$model"
+    -ngld 999 -ngl 999
+    -co --draft-min 3 --draft-max 5
+)
+
+usage() {
+    echo "usage: $0 [release|debug] [cli|speculative] [nvtx]"
     exit 1
-fi
+}
 
-if [[ ${2-} == "nvtx" ]]; then
+mode=${1-}
+kind=${2-}
+nvtx_flag=${3-}
+
+case "$mode" in
+release)
+    bin_dir="./build_rel/bin"
+    ;;
+debug)
+    bin_dir="./build/bin"
+    ;;
+*)
+    usage
+    ;;
+esac
+
+case "$kind" in
+cli)
+    bin="$bin_dir/llama-cli"
+    inference_opts=("${cli_opts[@]}" "${common_opts[@]}")
+    ;;
+speculative)
+    bin="$bin_dir/llama-speculative"
+    inference_opts=("${speculative_opts[@]}" "${common_opts[@]}")
+    ;;
+*)
+    usage
+    ;;
+esac
+
+if [[ -z ${nvtx_flag-} ]]; then
+    "$bin" "${inference_opts[@]}"
+elif [[ $nvtx_flag == "nvtx" ]]; then
     nsys profile --trace=cuda,nvtx "$bin" "${inference_opts[@]}"
 else
-    "$bin" "${inference_opts[@]}"
+    usage
 fi
