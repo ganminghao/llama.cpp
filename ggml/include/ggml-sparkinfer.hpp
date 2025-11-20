@@ -16,6 +16,15 @@ typedef struct {
     int weight_idx, cache_idx;
 } copy_pair;
 
+inline int get_env_int(const char * env, int default_value) {
+    if (const char * p = getenv(env)) {
+        return atoi(p);
+    }
+    return default_value;
+}
+
+const static float k_dx_dfr_decay = get_env_int("DX_DFR_DECAY", 69) / 1000.0f;
+
 struct sparkinfer_layer_cache {
     ggml_tensor * layer_ffn_pred_up     = nullptr;
     ggml_tensor * layer_ffn_pred_down   = nullptr;
@@ -50,6 +59,7 @@ struct sparkinfer_layer_cache {
     static const bool k_enable_spif_reload;
     size_t            reload_cnt      = 0;
     size_t            reload_wnd_size = 8;
+    float *           dfr_decay       = nullptr;
 
     ggml_tensor * weight_only_buf;
     ggml_tensor * cache_only_buf;
@@ -123,7 +133,7 @@ struct SingleThreadExecutor {
         return fut;
     }
 
-    void make_anchor(SparkinferWaitType wait_type) {
+    void make_anchor(SparkinferWaitType wait_type, float * dfr_decay) {
         AnchorState * anchor = anchor_ref(wait_type);
 
         {
@@ -133,7 +143,7 @@ struct SingleThreadExecutor {
             anchor->active     = true;
         }
 
-        enqueue_io([this, anchor] {
+        enqueue_io([this, anchor, dfr_decay] {
             std::deque<std::function<void()>> to_move;
             {
                 std::lock_guard<std::mutex> lock(mtx_);
@@ -147,6 +157,10 @@ struct SingleThreadExecutor {
 
             if (!to_move.empty()) {
                 cv_.notify_one();
+            }
+
+            if (dfr_decay) {
+                *dfr_decay += *dfr_decay * k_dx_dfr_decay * (!to_move.empty() ? 1.0f : -1.0f);
             }
         });
     }

@@ -2,8 +2,8 @@
 
 export CUDA_VISIBLE_DEVICES=0
 
-export GPU_ONLY=8
-export DFR_DECAY=69
+# export GPU_ONLY=8
+export DX_DFR_DECAY=69
 
 export SPIF_REORDER=ON
 export SPIF_PARALLEL=ON
@@ -15,6 +15,7 @@ model="../prosparse-llama-2-7b.gguf"
 model_split="../prosparse-llama-2-7b-sparkinfer-model-split.gguf"
 prompt="Bubble sort algorithm in python:"
 
+gpu_ram_budget=10
 threads=4
 seed=1234
 max_tokens=128
@@ -22,10 +23,12 @@ max_tokens=128
 common_opts=(
     -spif-ms "$model_split"
     -cffn --no-mmap
+    -grmb "$gpu_ram_budget"
     -t "$threads"
     -s "$seed"
     -p "$prompt"
     -n "$max_tokens"
+    -kvu
 )
 
 cli_opts=(

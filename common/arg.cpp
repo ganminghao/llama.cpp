@@ -1904,15 +1904,23 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
-        {"-spif-ms", "--sparkinfer-model-split"}, "FNAME",
-        "model split file path (required in sparkinfer)",
+        {"--sparkinfer-model-split", "-spif-ms"}, "FNAME",
+        "path to the model split file used by Sparkinfer",
         [](common_params & params, const std::string & value) {
             params.spif_ms_path = value;
         }
     ).set_env("LLAMA_ARG_SP_MODEL_SPLIT"));
     add_opt(common_arg(
+        {"--gpu-ram-budget", "-grmb"}, "N",
+        "sets a memory budget (in GiB) on GPU for tensors; if set to 0, no explicit limit is applied (default: 0)",
+        [](common_params & params, int value) {
+            if (value < 0) { throw std::invalid_argument("invalid value"); }
+            params.gpu_ram_budget = value;
+        }
+    ).set_env("LLAMA_ARG_GPU_RAM_BUDGET"));
+    add_opt(common_arg(
         {"--cpu-ffn", "-cffn"},
-        "keep all Feed Forward Network weights in the CPU",
+        "keep all Feed Forward Network (FFN) weights in the CPU",
         [](common_params & params) {
             params.tensor_buft_overrides.push_back(llm_ffn_cpu_override());
         }
