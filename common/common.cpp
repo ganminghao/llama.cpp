@@ -1226,6 +1226,7 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.use_extra_bufts = !params.no_extra_bufts;
     mparams.no_host         = params.no_host;
     mparams.spif_ms_path    = params.spif_ms_path.c_str();
+    mparams.gpu_ram_budget  = params.gpu_ram_budget;
 
     if (params.kv_overrides.empty()) {
         mparams.kv_overrides = NULL;
