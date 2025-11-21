@@ -2204,14 +2204,13 @@ struct ggml_tensor * ggml_scale_add(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         struct ggml_tensor  * b,
-        float                 scale,
+        float               * scale,
         float                 normalizer,
         bool                  inplace) {
     struct ggml_tensor * result = inplace ? ggml_view_tensor(ctx, a) : ggml_dup_tensor(ctx, a);
 
-    ggml_set_op_params_f32(result, 0, scale);
-    ggml_set_op_params_f32(result, 1, 1.0f - scale);
-    ggml_set_op_params_f32(result, 2, normalizer);
+    scale[2] = normalizer; // {λ, 1-λ, normalizer}
+    ggml_set_op_params(result, (void *) &scale, sizeof(void *));
 
     result->op     = GGML_OP_SCALE_ADD;
     result->src[0] = a;

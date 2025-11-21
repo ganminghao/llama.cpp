@@ -2581,7 +2581,8 @@ static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor *
     if (spif_wt == SPIF_FFN_UP) {
         spif_executor->make_anchor(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_MUL_MAT_SPARSE, nullptr);
     } else if (spif_wt == SPIF_FFN_DOWN) {
-        spif_executor->make_anchor(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_AXPY_SPARSE, spif_lc->dfr_decay);
+        spif_executor->make_anchor(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_AXPY_SPARSE,
+                                   static_cast<float *>(spif_lc->dfr_decay_pack->data));
     }
 }
 
