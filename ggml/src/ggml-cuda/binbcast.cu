@@ -23,10 +23,11 @@ static __device__ __forceinline__ float op_div(const float a, const float b) {
     return a / b;
 }
 
-__device__ __constant__ float dfr_data[3];
+__device__ __constant__ float dfr_decay_pack[3];
 
 static __device__ __forceinline__ float op_scale_add(const float a, const float b) {
-    return dfr_data[0] * a + dfr_data[1] * (b / dfr_data[2]);
+    return dfr_decay_pack[0] * a + dfr_decay_pack[1] * (b / dfr_decay_pack[2]);
+    // return dfr_decay_pack[0] * a + b;
 }
 
 static __device__ __forceinline__ float op_xor(const float a, const float b) {
@@ -423,7 +424,9 @@ void ggml_cuda_op_div(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 }
 
 void ggml_cuda_op_scale_add(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    CUDA_CHECK(cudaMemcpyToSymbolAsync(dfr_data, &dst->op_params, 3 * sizeof(float), 0, cudaMemcpyHostToDevice, ctx.stream()));
+    void * src_ptr = nullptr;
+    memcpy((void *) &src_ptr, &(dst->op_params[0]), sizeof(void *));
+    CUDA_CHECK(cudaMemcpyToSymbolAsync(dfr_decay_pack, src_ptr, 3 * sizeof(float), 0, cudaMemcpyHostToDevice, ctx.stream()));
     ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_scale_add>>(dst->src[0], dst->src[1], dst, dst->src[0]->data, dst->src[1]->data, dst->data, ctx.stream());
 }
 
