@@ -17,7 +17,6 @@ struct sparkinfer_cache_manager {
 
     bool          is_gated_mlp = false;
     ggml_tensor * identity     = nullptr;
-    ggml_tensor * dfr_decays   = nullptr;
 
     sparkinfer_cache_manager(const std::string & spif_ms_path, llama_model & model, size_t budget);
     ~sparkinfer_cache_manager();
