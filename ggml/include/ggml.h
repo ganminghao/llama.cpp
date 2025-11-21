@@ -961,7 +961,7 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             struct ggml_tensor  * b,
-                         float    scale,
+                         float  * scale,
                          float    normalizer,
                           bool    inplace);
 

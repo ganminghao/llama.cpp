@@ -60,11 +60,11 @@ struct sparkinfer_layer_cache {
     static const bool k_enable_spif_reload;
     size_t            reload_cnt      = 0;
     size_t            reload_wnd_size = 8;
-    float *           dfr_decay       = nullptr;
 
-    ggml_tensor * weight_only_buf;
-    ggml_tensor * cache_only_buf;
-    ggml_tensor * neuron_idx_buf;
+    ggml_tensor * weight_only_buf = nullptr;
+    ggml_tensor * cache_only_buf  = nullptr;
+    ggml_tensor * neuron_idx_buf  = nullptr;
+    ggml_tensor * dfr_decay_pack  = nullptr;
 
     sparkinfer_layer_cache()  = default;
     ~sparkinfer_layer_cache() = default;
@@ -160,18 +160,10 @@ struct SingleThreadExecutor {
                 cv_.notify_one();
             }
 
-            if (dfr_decay) {
-                *dfr_decay += *dfr_decay * k_dx_dfr_decay * (!to_move.empty() ? 1.0f : -1.0f);
-                if (!to_move.empty()) {
-                    *dfr_decay *= (1.0f + k_dx_dfr_decay);
-                } else {
-                    *dfr_decay *= (1.0f - k_dx_dfr_decay);
-                }
-                if (*dfr_decay > 1.0f) {
-                    *dfr_decay = 1.0f;
-                } else if (*dfr_decay < 0.0f) {
-                    *dfr_decay = 0.0f;
-                }
+            if (k_dx_dfr_decay > 0.0f && dfr_decay) {
+                dfr_decay[0] *= 1.0f + (to_move.empty() ? -k_dx_dfr_decay : k_dx_dfr_decay);
+                dfr_decay[0] = std::clamp(dfr_decay[0], 0.05f, 0.95f);
+                dfr_decay[1] = 1.0f - dfr_decay[0];
             }
         });
     }

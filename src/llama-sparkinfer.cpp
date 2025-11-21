@@ -3,7 +3,6 @@
 #include "ggml-cuda.h"
 #include "llama-impl.h"
 
-#include <algorithm>
 #include <cstring>
 #include <numeric>
 
@@ -140,8 +139,7 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         return ggml_set_name(tensor_meta, tensor_name);
     };
 
-    identity   = create_tensor(ctx_gpu, GGML_TYPE_F32, { group_count, group_count }, 999, "identity");
-    dfr_decays = create_tensor(ctx_cpu, GGML_TYPE_F32, { n_layer }, 999, "dfr_decays");
+    identity = create_tensor(ctx_gpu, GGML_TYPE_F32, { group_count, group_count }, 999, "identity");
 
     for (uint32_t il = 0; il < n_layer; ++il) {
         layer_caches[il] = new sparkinfer_layer_cache();
@@ -186,6 +184,7 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         lc->neuron_idx_buf  = create_tensor(ctx_cpu, GGML_TYPE_I32, { lc->layer_cm.m }, il, "ffn_neuron_idx_buf");
         lc->weight_only_buf = create_tensor(ctx_cpu, GGML_TYPE_F32, { lc->layer_cm.n_g }, il, "ffn_weight_only_buf");
         lc->cache_only_buf  = create_tensor(ctx_cpu, GGML_TYPE_F32, { lc->layer_cm.n_g }, il, "ffn_cache_only_buf");
+        lc->dfr_decay_pack  = create_tensor(ctx_cpu, GGML_TYPE_F32, { 3 }, il, "ffn_dfr_decay_data");
 
         reorder_perms[il] = create_tensor(ctx_cpu, GGML_TYPE_I32, { lc->layer_cm.n }, il, "ffn_reorder_perms");
     }
@@ -216,8 +215,6 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         f32_mat_buf[i * group_count + i] = 1.0f;
     }
     ggml_backend_tensor_set(identity, f32_mat_buf.data(), 0, ggml_nbytes(identity));
-    std::vector<float> f32_vec_buf(n_layer, 0.5f);
-    ggml_backend_tensor_set(dfr_decays, f32_vec_buf.data(), 0, ggml_nbytes(dfr_decays));
 
     std::vector<uint8_t> src_mat_buf(n_embd * n_ff * type_size);
     std::vector<uint8_t> dst_mat_buf(n_embd * n_ff * type_size);
@@ -297,15 +294,19 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         auto neuron_mask = std::vector<int32_t>(lc->layer_cm.n);
         std::fill_n(neuron_mask.begin(), lc->layer_cm.m, 1);
         // [1_0, 1_1, ..., 1_(m/g)-1, 0_(m/g), ..., 0_(n/g)-1]
-        auto group_mask_and_dfr_scores = std::vector<float>(lc->layer_cm.n_g);
-        std::fill_n(group_mask_and_dfr_scores.begin(), lc->layer_cm.m_g, 1.0f);
+        auto group_mask = std::vector<float>(lc->layer_cm.n_g);
+        std::fill_n(group_mask.begin(), lc->layer_cm.m_g, 1.0f);
+        // [0.0_0, 0.0_1, ..., 0.0_(m/g)-1, 0_(m/g), ..., 0_(n/g)-1]
+        auto dfr_scores = std::vector<float>(lc->layer_cm.n_g);
+        std::fill_n(dfr_scores.begin(), lc->layer_cm.m_g, 0.0f);
+        auto dfr_decay_data = std::vector<float>({ 0.67f, 1.0f - 0.67f, 1.0f });
 
         ggml_backend_tensor_set(lc->neuron_idx, neuron_idx.data(), 0, ggml_nbytes(lc->neuron_idx));
         ggml_backend_tensor_set(lc->group_maps, group_maps.data(), 0, ggml_nbytes(lc->group_maps));
         ggml_backend_tensor_set(lc->neuron_mask, neuron_mask.data(), 0, ggml_nbytes(lc->neuron_mask));
-        ggml_backend_tensor_set(lc->group_mask, group_mask_and_dfr_scores.data(), 0, ggml_nbytes(lc->group_mask));
-        ggml_backend_tensor_set(lc->dfr_scores, group_mask_and_dfr_scores.data(), 0, ggml_nbytes(lc->dfr_scores));
-        lc->dfr_decay = static_cast<float *>(dfr_decays->data) + il;
+        ggml_backend_tensor_set(lc->group_mask, group_mask.data(), 0, ggml_nbytes(lc->group_mask));
+        ggml_backend_tensor_set(lc->dfr_scores, dfr_scores.data(), 0, ggml_nbytes(lc->dfr_scores));
+        ggml_backend_tensor_set(lc->dfr_decay_pack, dfr_decay_data.data(), 0, ggml_nbytes(lc->dfr_decay_pack));
 
         const auto cache_n_mega_bytes = (cache_nbytes * (is_gated_mlp ? 3 : 2)) / (1024.0 * 1024.0);
         LLAMA_LOG_INFO("%s: [layer %2u] offloaded %6.2f MiB and cached %5d (%6.2f%%) neurons to GPU\n", __func__, il,
@@ -346,7 +347,8 @@ static std::string format_array(const T * data, size_t n, size_t max_print = (si
 }
 
 sparkinfer_cache_manager::~sparkinfer_cache_manager() {
-    std::vector<int> normalized_flags(layer_caches.size(), 0);
+    std::vector<int>   normalized_flags(layer_caches.size(), 0);
+    std::vector<float> dfr_decays(layer_caches.size(), 0.0f);
     for (size_t il = 0; il < layer_caches.size(); ++il) {
         auto * lc = layer_caches[il];
 
@@ -354,6 +356,7 @@ sparkinfer_cache_manager::~sparkinfer_cache_manager() {
         ggml_backend_tensor_get(lc->dfr_scores, dfr_scores.data(), 0, ggml_nbytes(lc->dfr_scores));
         normalized_flags[il] =
             std::all_of(dfr_scores.begin(), dfr_scores.end(), [](float v) { return (v >= 0.f && v <= 1.f); });
+        dfr_decays[il] = static_cast<const float *>(lc->dfr_decay_pack->data)[0];
 
         LLAMA_LOG_INFO("%s: [layer %2zu] dfr_scores check: %s\n", __func__, il,
                        format_array(dfr_scores.data(), dfr_scores.size(), 8, true).c_str());
@@ -363,8 +366,8 @@ sparkinfer_cache_manager::~sparkinfer_cache_manager() {
     }
     LLAMA_LOG_INFO("%s: final normalized flags are %s\n", __func__,
                    format_array(normalized_flags.data(), layer_caches.size()).c_str());
-    LLAMA_LOG_INFO("%s: final dfr_decays are %s\n", __func__,
-                   format_array(static_cast<const float *>(dfr_decays->data), layer_caches.size()).c_str());
+    LLAMA_LOG_INFO("%s: final dfr decays are %s\n", __func__,
+                   format_array(dfr_decays.data(), layer_caches.size()).c_str());
 
     ggml_backend_buffer_free(buf_cpu);
     ggml_free(ctx_cpu);
