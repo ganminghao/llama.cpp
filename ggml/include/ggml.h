@@ -960,7 +960,10 @@ extern "C" {
     GGML_API struct ggml_tensor * ggml_scale_add(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
-            struct ggml_tensor  * b, float scale, bool inplace);
+            struct ggml_tensor  * b,
+                         float    scale,
+                         float    normalizer,
+                          bool    inplace);
 
     GGML_API struct ggml_tensor * ggml_xor(
             struct ggml_context * ctx,
