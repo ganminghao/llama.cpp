@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 
+#include <algorithm>
 #include <deque>
 #include <future>
 
@@ -23,7 +24,7 @@ inline int get_env_int(const char * env, int default_value) {
     return default_value;
 }
 
-const static float k_dx_dfr_decay = get_env_int("DX_DFR_DECAY", 69) / 1000.0f;
+const static float k_dx_dfr_decay = get_env_int("DX_DFR_DECAY", 69) / 10000.0f;
 
 struct sparkinfer_layer_cache {
     ggml_tensor * layer_ffn_pred_up     = nullptr;
@@ -161,6 +162,16 @@ struct SingleThreadExecutor {
 
             if (dfr_decay) {
                 *dfr_decay += *dfr_decay * k_dx_dfr_decay * (!to_move.empty() ? 1.0f : -1.0f);
+                if (!to_move.empty()) {
+                    *dfr_decay *= (1.0f + k_dx_dfr_decay);
+                } else {
+                    *dfr_decay *= (1.0f - k_dx_dfr_decay);
+                }
+                if (*dfr_decay > 1.0f) {
+                    *dfr_decay = 1.0f;
+                } else if (*dfr_decay < 0.0f) {
+                    *dfr_decay = 0.0f;
+                }
             }
         });
     }
