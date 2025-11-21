@@ -187,6 +187,9 @@ int main(int argc, char ** argv) {
     int n_predict = 0;
     int n_drafted = 0;
     int n_accept  = 0;
+    int n_drafted_token = 0;
+    float total_accept_len = 0;
+    int total_rounds = 0;
 
     int n_past_tgt = inp.size();
     int n_past_dft = inp.size();
@@ -422,6 +425,9 @@ int main(int argc, char ** argv) {
         {
             LOG_DBG("the sampled target token (%d, '%s') did not match, or we ran out of drafted tokens\n", token_id, token_str.c_str());
 
+            total_accept_len += i_dft;
+            total_rounds += 1;
+
             // TODO: simplify
             {
                 LOG_DBG("keeping sequence %d, n_past_tgt = %d, n_past_dft = %d\n", s_keep, n_past_tgt, n_past_dft);
@@ -558,6 +564,8 @@ int main(int argc, char ** argv) {
                     // save cur_p.data into drafts[s].dists
                     drafts[s].dists.push_back({cur_p->data, cur_p->data + cur_p->size});
 
+                    n_drafted_token++;
+
                     // add unique drafted tokens to the target batch
                     drafts[s].i_batch_tgt.push_back(batch_tgt.n_tokens);
 
@@ -620,11 +628,14 @@ int main(int argc, char ** argv) {
     LOG_INF("decoded %4d tokens in %8.3f seconds, speed: %8.3f t/s\n", n_predict, (t_dec_end - t_dec_start) / 1e6f, n_predict  / ((t_dec_end - t_dec_start) / 1e6f));
 
     LOG_INF("\n");
-    LOG_INF("n_draft   = %d\n", n_draft);
-    LOG_INF("n_predict = %d\n", n_predict);
-    LOG_INF("n_drafted = %d\n", n_drafted);
-    LOG_INF("n_accept  = %d\n", n_accept);
-    LOG_INF("accept    = %.3f%%\n", 100.0f * n_accept / n_drafted);
+    LOG_INF("n_draft         = %d\n", n_draft);
+    LOG_INF("n_predict       = %d\n", n_predict);
+    LOG_INF("n_drafted       = %d\n", n_drafted);
+    LOG_INF("n_drafted_token = %d\n", n_drafted_token);
+    LOG_INF("n_accept        = %d\n", n_accept);
+    LOG_INF("accept_decode   = %.3f%%\n", 100.0f * n_accept / n_drafted);
+    LOG_INF("accept_token    = %.3f%%\n", 100.0f * n_accept / n_drafted_token);
+    LOG_INF("avg_accept_len  = %.3f\n", total_accept_len / total_rounds);
 
     LOG_INF("\n");
     LOG_INF("draft:\n\n");
