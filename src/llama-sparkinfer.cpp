@@ -116,9 +116,9 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
     is_gated_mlp             = !(layers[0].ffn_gate == nullptr);
     layer_caches             = std::vector<sparkinfer_layer_cache *>(n_layer);
 
-    const auto       cache_budget = budget / (n_embd * type_size) / (is_gated_mlp ? 3 : 2) - n_ff;
-    std::vector<int> cache_sizes(n_layer, n_ff);
-    for (size_t i = 1; i < cache_sizes.size(); ++i) {
+    const auto       cache_budget = budget / (n_embd * type_size) / (is_gated_mlp ? 3 : 2);
+    std::vector<int> cache_sizes(n_layer);
+    for (size_t i = 0; i < cache_sizes.size(); ++i) {
         cache_sizes[i] =
             std::min((static_cast<uint32_t>(cache_budget * normalized_pattern[i] / group_size) * group_size), n_ff);
     }
