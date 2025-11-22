@@ -2226,7 +2226,8 @@ static void ggml_compute_forward_axpy_sparse_pro(const struct ggml_compute_param
 
     // each thread process a portion of result tensor
     // we split thinner than ne00/nth to avoid slow thread
-    int64_t num_chunks    = nth * 1;  // aim for at least 1/2/3 chunks per thread
+    int64_t K = n_tokens == 1 ? 8 : 1;
+    int64_t num_chunks    = nth * K;  // aim for at least 1/2/3 chunks per thread
     int64_t ele_per_chunk = (ne00 + num_chunks - 1) / (num_chunks);
 
     // we make sure the chunk size is multiple of cache line size to avoid false sharing
