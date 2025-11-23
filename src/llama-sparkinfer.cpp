@@ -6,7 +6,7 @@
 #include <cstring>
 #include <numeric>
 
-const static int k_gpu_only = get_env_int("GPU_ONLY", 0);
+const static int k_spif_gpu_only = get_env_int("SPIF_GPU_ONLY", 0);
 
 const bool sparkinfer_layer_cache::k_enable_spif_reload =
     (getenv("SPIF_PARALLEL") != nullptr && getenv("SPIF_RELOAD") != nullptr);
@@ -51,7 +51,7 @@ void sparkinfer_layer_cache::sparkinfer_reload_plan() {
 
     int weight_idx = 0;
     int cache_idx  = 0;
-    reload_cnt     = 0;
+    reload_count   = 0;
 
     for (;;) {
         while (weight_idx < n_g && !weight_only[weight_idx]) {
@@ -77,9 +77,9 @@ void sparkinfer_layer_cache::sparkinfer_reload_plan() {
         }
         group_maps[weight_idx] = group_idx;
 
-        reload_plan[reload_cnt].weight_idx = weight_idx;
-        reload_plan[reload_cnt].cache_idx  = group_idx;
-        ++reload_cnt;
+        reload_plan[reload_count].weight_idx = weight_idx;
+        reload_plan[reload_count].cache_idx  = group_idx;
+        ++reload_count;
 
         ++weight_idx;
         ++cache_idx;
@@ -125,11 +125,11 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
     auto reorder_perms = std::vector<ggml_tensor *>(n_layer);
 
     // for simulation, we select some layers to store all their neurons
-    auto cache_sizes_idx = std::vector<int>(n_layer);
-    std::iota(cache_sizes_idx.begin(), cache_sizes_idx.end(), 0);
-    std::nth_element(cache_sizes_idx.begin(), cache_sizes_idx.begin() + k_gpu_only, cache_sizes_idx.end(),
+    auto cs_idx = std::vector<int>(n_layer);
+    std::iota(cs_idx.begin(), cs_idx.end(), 0);
+    std::nth_element(cs_idx.begin(), cs_idx.begin() + k_spif_gpu_only, cs_idx.end(),
                      [&](int i, int j) { return cache_sizes[i] > cache_sizes[j]; });
-    std::for_each(cache_sizes_idx.begin(), cache_sizes_idx.begin() + k_gpu_only, [&](int i) { cache_sizes[i] = n_ff; });
+    std::for_each(cs_idx.begin(), cs_idx.begin() + k_spif_gpu_only, [&](int i) { cache_sizes[i] = n_ff; });
 
     auto create_tensor = [&](ggml_context * ctx, ggml_type type, std::vector<int64_t> ne, uint32_t il,
                              const char * name) {
@@ -153,18 +153,19 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
             /*.mg = */ static_cast<int>(cache_sizes[il] / group_size),
         };
         lc->reload_plan = new copy_pair[lc->layer_cm.m]();
+        lc->gpu_only    = (lc->layer_cm.m == lc->layer_cm.n);
 
-        lc->layer_ffn_pred_up     = layers[il].ffn_pred_up;
-        lc->layer_ffn_pred_down   = layers[il].ffn_pred_down;
-        lc->layer_ffn_pred_up_b   = layers[il].ffn_pred_up_b;
-        lc->layer_ffn_pred_down_b = layers[il].ffn_pred_down_b;
+        lc->ffn_pred_up     = layers[il].ffn_pred_up;
+        lc->ffn_pred_down   = layers[il].ffn_pred_down;
+        lc->ffn_pred_up_b   = layers[il].ffn_pred_up_b;
+        lc->ffn_pred_down_b = layers[il].ffn_pred_down_b;
 
-        lc->layer_ffn_up     = layers[il].ffn_up;
-        lc->layer_ffn_gate   = layers[il].ffn_gate;
-        lc->layer_ffn_down   = layers[il].ffn_down_t;
-        lc->layer_ffn_up_b   = layers[il].ffn_up_b;
-        lc->layer_ffn_gate_b = layers[il].ffn_gate_b;
-        lc->layer_ffn_down_b = layers[il].ffn_down_b;
+        lc->ffn_up     = layers[il].ffn_up;
+        lc->ffn_gate   = layers[il].ffn_gate;
+        lc->ffn_down   = layers[il].ffn_down_t;
+        lc->ffn_up_b   = layers[il].ffn_up_b;
+        lc->ffn_gate_b = layers[il].ffn_gate_b;
+        lc->ffn_down_b = layers[il].ffn_down_b;
 
         lc->ffn_up_cache =
             create_tensor(ctx_gpu, layers[il].ffn_up->type, { n_embd, lc->layer_cm.m }, il, "ffn_up.cache");
@@ -260,29 +261,28 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         }
     };
 
-    float total_cache_n_mega_bytes = 0.0;
     for (uint32_t il = 0; il < n_layer; ++il) {
         auto * lc           = layer_caches[il];
         auto * reorder_perm = reorder_perms[il];
 
         std::vector<int32_t> perm(lc->layer_cm.n);
         ggml_backend_tensor_get(reorder_perm, perm.data(), 0, ggml_nbytes(reorder_perm));
-        reorder_if_exists(lc->layer_ffn_pred_down, perm);
-        reorder_if_exists(lc->layer_ffn_pred_down_b, perm);
-        reorder_if_exists(lc->layer_ffn_up, perm);
-        reorder_if_exists(lc->layer_ffn_up_b, perm);
+        reorder_if_exists(lc->ffn_pred_down, perm);
+        reorder_if_exists(lc->ffn_pred_down_b, perm);
+        reorder_if_exists(lc->ffn_up, perm);
+        reorder_if_exists(lc->ffn_up_b, perm);
         if (is_gated_mlp) {
-            reorder_if_exists(lc->layer_ffn_gate, perm);
-            reorder_if_exists(lc->layer_ffn_gate_b, perm);
+            reorder_if_exists(lc->ffn_gate, perm);
+            reorder_if_exists(lc->ffn_gate_b, perm);
         }
-        reorder_if_exists(lc->layer_ffn_down, perm);
+        reorder_if_exists(lc->ffn_down, perm);
 
         const auto cache_nbytes = ggml_nbytes(lc->ffn_up_cache);
-        ggml_backend_tensor_set(lc->ffn_up_cache, lc->layer_ffn_up->data, 0, cache_nbytes);
+        ggml_backend_tensor_set(lc->ffn_up_cache, lc->ffn_up->data, 0, cache_nbytes);
         if (is_gated_mlp) {
-            ggml_backend_tensor_set(lc->ffn_gate_cache, lc->layer_ffn_gate->data, 0, cache_nbytes);
+            ggml_backend_tensor_set(lc->ffn_gate_cache, lc->ffn_gate->data, 0, cache_nbytes);
         }
-        ggml_backend_tensor_set(lc->ffn_down_cache, lc->layer_ffn_down->data, 0, cache_nbytes);
+        ggml_backend_tensor_set(lc->ffn_down_cache, lc->ffn_down->data, 0, cache_nbytes);
 
         // [0, 1, ..., m-1]
         auto neuron_idx = std::vector<int32_t>(lc->layer_cm.m);
@@ -311,69 +311,42 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         const auto cache_n_mega_bytes = (cache_nbytes * (is_gated_mlp ? 3 : 2)) / (1024.0 * 1024.0);
         LLAMA_LOG_INFO("%s: [layer %2u] offloaded %6.2f MiB and cached %5d (%6.2f%%) neurons to GPU\n", __func__, il,
                        cache_n_mega_bytes, lc->layer_cm.m, lc->layer_cm.m * 100.0 / lc->layer_cm.n);
-        total_cache_n_mega_bytes += cache_n_mega_bytes;
     }
-    LLAMA_LOG_INFO("%s: totally offloaded %.2f MiB neurons to GPU\n", __func__, total_cache_n_mega_bytes);
-}
-
-template <typename T>
-static std::string format_array(const T * data, size_t n, size_t max_print = (size_t) -1, bool with_ellipsis = false) {
-    char        buf[32];
-    std::string out = "[";
-
-    size_t show = n;
-    if (max_print != (size_t) -1) {
-        show = std::min(max_print, n);
-    }
-
-    for (size_t i = 0; i < show; ++i) {
-        if constexpr (std::is_floating_point<T>::value) {
-            snprintf(buf, sizeof(buf), "%.5f", data[i]);
-        } else {
-            snprintf(buf, sizeof(buf), "%d", data[i]);
-        }
-        out += buf;
-        if (i + 1 < show) {
-            out += ", ";
-        }
-    }
-
-    if (with_ellipsis && n > show) {
-        out += ", ...";
-    }
-
-    out += "]";
-    return out;
+    LLAMA_LOG_INFO("%s: the cache manger has totally %.2f MiB GPU memory footprint\n", __func__,
+                   ggml_backend_buffer_get_size(buf_gpu) / (1024.0 * 1024.0));
 }
 
 sparkinfer_cache_manager::~sparkinfer_cache_manager() {
-    std::vector<int>   normalized_flags(layer_caches.size(), 0);
+    auto format_array = [&](const float * data, size_t n) {
+        std::string out = "[";
+        char        buf[32];
+        for (size_t i = 0; i < n; ++i) {
+            snprintf(buf, sizeof(buf), "%.5f", data[i]);
+            out += buf;
+            if (i + 1 < n) {
+                out += ", ";
+            }
+        }
+        out += "]";
+        return out;
+    };
+
     std::vector<float> dfr_decays(layer_caches.size(), 0.0f);
     for (size_t il = 0; il < layer_caches.size(); ++il) {
-        auto * lc = layer_caches[il];
-
-        std::vector<float> dfr_scores(lc->layer_cm.n_g);
-        ggml_backend_tensor_get(lc->dfr_scores, dfr_scores.data(), 0, ggml_nbytes(lc->dfr_scores));
-        normalized_flags[il] =
-            std::all_of(dfr_scores.begin(), dfr_scores.end(), [](float v) { return (v >= 0.f && v <= 1.f); });
+        auto * lc      = layer_caches[il];
         dfr_decays[il] = static_cast<const float *>(lc->dfr_decay_pack->data)[0];
-
-        LLAMA_LOG_INFO("%s: [layer %2zu] dfr_scores check: %s\n", __func__, il,
-                       format_array(dfr_scores.data(), dfr_scores.size(), 8, true).c_str());
 
         delete[] lc->reload_plan;
         delete lc;
     }
-    LLAMA_LOG_INFO("%s: final normalized flags are %s\n", __func__,
-                   format_array(normalized_flags.data(), layer_caches.size()).c_str());
     LLAMA_LOG_INFO("%s: final dfr decays are %s\n", __func__,
                    format_array(dfr_decays.data(), layer_caches.size()).c_str());
-
-    ggml_backend_buffer_free(buf_cpu);
-    ggml_free(ctx_cpu);
-    ggml_backend_free(backend_cpu);
 
     ggml_backend_buffer_free(buf_gpu);
     ggml_free(ctx_gpu);
     ggml_backend_free(backend_gpu);
+
+    ggml_backend_buffer_free(buf_cpu);
+    ggml_free(ctx_cpu);
+    ggml_backend_free(backend_cpu);
 }

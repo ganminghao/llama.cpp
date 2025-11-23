@@ -1489,6 +1489,9 @@ void sparkinfer_set_node_state(ggml_backend_sched_t       sched,
     if (!k_enable_spif_parallel) {
         return;
     }
+    if (split_flag == SPIF_SPLIT_RELOAD && !sparkinfer_layer_cache::k_enable_spif_reload) {
+        return;
+    }
 
     auto * spif_extra      = get_extra(sched, tensor);
     spif_extra->split_flag = split_flag;
@@ -1501,9 +1504,6 @@ void sparkinfer_register_dependency(ggml_backend_sched_t        sched,
                                     enum sparkinfer_event_state src_state,
                                     enum sparkinfer_event_state dst_state) {
     if (!k_enable_spif_parallel) {
-        return;
-    }
-    if (src_state == SPIF_EVENT_MANUAL && !sparkinfer_layer_cache::k_enable_spif_reload) {
         return;
     }
 
@@ -1847,6 +1847,10 @@ ggml_backend_sched_t ggml_backend_sched_new(
 void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     if (sched == NULL) {
         return;
+    }
+    if (k_enable_spif_parallel) {
+        sched->spif_executor.reset();
+        sched->spif_events.reset();
     }
     for (int b = 0; b < sched->n_backends; b++) {
         for (int c = 0; c < sched->n_copies; c++) {
