@@ -883,12 +883,25 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
                                                   ggml_tensor *       inp_out_ids,
                                                   const llama_model * model,
                                                   int                 il) const {
+    const bool   is_last       = (il == n_layer - 1);
     const auto * layer         = &(model->layers[il]);
-    const auto * next_layer    = (il == n_layer - 1) ? nullptr : &(model->layers[il + 1]);
+    const auto * next_layer    = is_last ? nullptr : &(model->layers[il + 1]);
+    auto *       first_spif_lc = spif_cm->layer_caches[0];
     auto *       spif_lc       = spif_cm->layer_caches[il];
-    auto *       next_spif_lc  = (il == n_layer - 1) ? nullptr : spif_cm->layer_caches[il + 1];
-    const auto   gpu_only      = spif_lc->layer_cm.m == spif_lc->layer_cm.n;
-    const auto   next_gpu_only = next_spif_lc && next_spif_lc->layer_cm.m == next_spif_lc->layer_cm.n;
+    auto *       next_spif_lc  = is_last ? nullptr : spif_cm->layer_caches[il + 1];
+
+    auto update_dfr_scores = [&](auto * lc) {
+        ggml_tensor * mask = ggml_shifted_step(ctx0, lc->sparse_idx, -0.5f, false);
+        if (lc->sparse_idx->ne[1] > 1) {
+            mask = ggml_sum_cols(ctx0, mask);
+        }
+        ggml_tensor * deltas =
+            ggml_transpose(ctx0, ggml_sum_rows(ctx0, ggml_reshape_2d(ctx0, mask, lc->layer_cm.g, lc->layer_cm.n_g)));
+        ggml_tensor * dfr_scores_view =
+            ggml_scale_add(ctx0, lc->dfr_scores, deltas, static_cast<float *>(lc->dfr_decay_pack->data),
+                           static_cast<float>(lc->sparse_idx->ne[1] * lc->layer_cm.g), true);
+        ggml_build_forward_expand(gf, dfr_scores_view);
+    };
 
     ggml_tensor * sparse_idx = spif_lc->sparse_idx;
     if (il == 0) {
@@ -897,7 +910,7 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
         ggml_build_forward_expand(gf, sparse_idx);
         spif_lc->sparse_idx = sparse_idx;
     }
-    if (il < n_layer - 1) {
+    if (!is_last) {
         ggml_tensor * next_sparse_idx = build_predictor(cur, next_layer->ffn_pred_up, next_layer->ffn_pred_up_b,
                                                         next_layer->ffn_pred_down, next_layer->ffn_pred_down_b, il + 1);
         if (il + 1 == n_layer - 1 && inp_out_ids) {
@@ -906,19 +919,11 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
         ggml_build_forward_expand(gf, next_sparse_idx);
         next_spif_lc->sparse_idx = next_sparse_idx;
 
-        if (!next_gpu_only) {
-            ggml_tensor * mask = ggml_shifted_step(ctx0, next_spif_lc->sparse_idx, -0.5f, false);
-            if (next_spif_lc->sparse_idx->ne[1] > 1) {
-                mask = ggml_sum_cols(ctx0, mask);
-            }
-            ggml_tensor * deltas = ggml_transpose(
-                ctx0,
-                ggml_sum_rows(ctx0, ggml_reshape_2d(ctx0, mask, next_spif_lc->layer_cm.g, next_spif_lc->layer_cm.n_g)));
-            ggml_tensor * dfr_scores_view = ggml_scale_add(
-                ctx0, next_spif_lc->dfr_scores, deltas, static_cast<float *>(next_spif_lc->dfr_decay_pack->data),
-                static_cast<float>(next_spif_lc->sparse_idx->ne[1] * next_spif_lc->layer_cm.g), true);
-            ggml_build_forward_expand(gf, dfr_scores_view);
+        if (!next_spif_lc->gpu_only) {
+            update_dfr_scores(next_spif_lc);
         }
+    } else if (!first_spif_lc->gpu_only) {
+        update_dfr_scores(first_spif_lc);
     }
 
     ggml_tensor * up     = layer->ffn_up;
@@ -932,13 +937,14 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
     ggml_tensor * gpu_gate = spif_lc->ffn_gate_cache;
     ggml_tensor * gpu_down = spif_lc->ffn_down_cache;
 
-    ggml_tensor * neuron_idx  = gpu_only ? nullptr : spif_lc->neuron_idx;
-    ggml_tensor * neuron_mask = gpu_only ? nullptr : spif_lc->neuron_mask;
+    ggml_tensor * neuron_idx  = spif_lc->gpu_only ? nullptr : spif_lc->neuron_idx;
+    ggml_tensor * neuron_mask = spif_lc->gpu_only ? nullptr : spif_lc->neuron_mask;
 
     ggml_tensor * cur_up = ggml_mul_mat_sparse(ctx0, gpu_up, cur, sparse_idx, neuron_idx);
     cb(cur_up, "ffn_up_sparse_gpu", il);
     ggml_build_forward_expand(gf, cur_up);
-    if (!gpu_only || !next_gpu_only) {
+    if (!spif_lc->gpu_only || (!is_last && next_spif_lc && !next_spif_lc->gpu_only) ||
+        (is_last && !first_spif_lc->gpu_only)) {
         sparkinfer_set_node_state(sched, cur_up, SPIF_SPLIT_MUL_MAT_SPARSE);
     }
 
@@ -950,47 +956,53 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
     }
 
     ggml_tensor * cur_reload_plan = nullptr;
-    if (il < n_layer - 1 && !next_gpu_only) {
-        ggml_tensor * topk_idx    = ggml_top_k(ctx0, next_spif_lc->dfr_scores, next_spif_lc->layer_cm.m_g);
-        ggml_tensor * topk_mask   = ggml_sum_cols(ctx0, ggml_get_rows(ctx0, spif_cm->identity, topk_idx));
-        ggml_tensor * diff_mask   = ggml_xor(ctx0, next_spif_lc->group_mask, topk_mask);
-        ggml_tensor * weight_only = ggml_and(ctx0, topk_mask, diff_mask);
-        cb(weight_only, "ffn_weight_only", il + 1);
-        ggml_build_forward_expand(gf, weight_only);
-        ggml_tensor * cache_only = ggml_and(ctx0, next_spif_lc->group_mask, diff_mask);
-        cb(cache_only, "ffn_cache_only", il + 1);
-        ggml_build_forward_expand(gf, cache_only);
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, topk_mask, next_spif_lc->group_mask));
 
-        cur_reload_plan = next_spif_lc->build_reload_plan(ctx0, weight_only, cache_only);
+    auto build_reload_up_gate = [&](auto * lc, int il) {
+        ggml_tensor * topk_idx    = ggml_top_k(ctx0, lc->dfr_scores, lc->layer_cm.m_g);
+        ggml_tensor * topk_mask   = ggml_sum_cols(ctx0, ggml_get_rows(ctx0, spif_cm->identity, topk_idx));
+        ggml_tensor * diff_mask   = ggml_xor(ctx0, lc->group_mask, topk_mask);
+        ggml_tensor * weight_only = ggml_and(ctx0, topk_mask, diff_mask);
+        cb(weight_only, "ffn_weight_only", il);
+        ggml_build_forward_expand(gf, weight_only);
+        ggml_tensor * cache_only = ggml_and(ctx0, lc->group_mask, diff_mask);
+        cb(cache_only, "ffn_cache_only", il);
+        ggml_build_forward_expand(gf, cache_only);
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, topk_mask, lc->group_mask));
+
+        cur_reload_plan = lc->build_reload_plan(ctx0, weight_only, cache_only);
 
         ggml_tensor * cur_reload_gate = nullptr;
-        if (next_spif_lc->layer_ffn_gate) {
-            cur_reload_gate = next_spif_lc->build_reload_exec(ctx0, cur_reload_plan, SPIF_FFN_GATE);
-            cb(cur_reload_gate, "ffn_gate_reload", il + 1);
+        if (lc->ffn_gate) {
+            cur_reload_gate = lc->build_reload_exec(ctx0, cur_reload_plan, SPIF_FFN_GATE);
+            cb(cur_reload_gate, "ffn_gate_reload", il);
             ggml_backend_sched_set_tensor_backend(sched, cur_reload_gate, backend_gpu);
             ggml_build_forward_expand(gf, cur_reload_gate);
-            next_spif_lc->reload_gate = cur_reload_gate;
+            lc->reload_gate = cur_reload_gate;
         }
 
-        cb(cur_reload_plan, "ffn_reload_plan", il + 1);
-        ggml_tensor * cur_reload_up = next_spif_lc->build_reload_exec(ctx0, cur_reload_plan, SPIF_FFN_UP);
-        cb(cur_reload_up, "ffn_up_reload", il + 1);
+        cb(cur_reload_plan, "ffn_reload_plan", il);
+        ggml_tensor * cur_reload_up = lc->build_reload_exec(ctx0, cur_reload_plan, SPIF_FFN_UP);
+        cb(cur_reload_up, "ffn_up_reload", il);
         ggml_backend_sched_set_tensor_backend(sched, cur_reload_up, backend_gpu);
         ggml_build_forward_expand(gf, cur_reload_up);
-        next_spif_lc->reload_up = cur_reload_up;
+        lc->reload_up = cur_reload_up;
 
+        if (cur_reload_gate) {
+            sparkinfer_set_node_state(sched, cur_reload_gate, SPIF_SPLIT_RELOAD);
+        }
         sparkinfer_set_node_state(sched, cur_reload_up, SPIF_SPLIT_TAIL);
+    };
+
+    if (!is_last && !next_spif_lc->gpu_only) {
+        build_reload_up_gate(next_spif_lc, il + 1);
+    } else if (is_last && !first_spif_lc->gpu_only) {
+        build_reload_up_gate(first_spif_lc, 0);
     }
 
-    if (!gpu_only) {
+    if (!spif_lc->gpu_only) {
         ggml_tensor * cur_up_cpu = ggml_mul_mat_sparse(ctx0, up, cur, sparse_idx, neuron_mask);
         cb(cur_up_cpu, "ffn_up_sparse_cpu", il);
         ggml_build_forward_expand(gf, cur_up_cpu);
-        if (il > 0) {
-            sparkinfer_register_dependency(sched, spif_lc->reload_up, cur_up, backend_gpu, SPIF_EVENT_MANUAL,
-                                           SPIF_EVENT_MANUAL);
-        }
         sparkinfer_register_dependency(sched, cur, cur_up_cpu, backend_gpu, SPIF_EVENT_RECORD, SPIF_EVENT_SYNCHRONIZE);
         if (il == 0) {
             sparkinfer_register_dependency(sched, sparse_idx, cur_up_cpu, backend_gpu, SPIF_EVENT_RECORD,
@@ -1002,10 +1014,6 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
             cur_gate_cpu = ggml_mul_mat_sparse(ctx0, gate, cur, sparse_idx, neuron_mask);
             cb(cur_gate_cpu, "ffn_gate_sparse_cpu", il);
             ggml_build_forward_expand(gf, cur_gate_cpu);
-            if (il > 0) {
-                sparkinfer_register_dependency(sched, spif_lc->reload_gate, cur_gate, backend_gpu, SPIF_EVENT_MANUAL,
-                                               SPIF_EVENT_MANUAL);
-            }
         }
 
         cur_up = ggml_add(ctx0, cur_up, cur_up_cpu);
@@ -1063,28 +1071,33 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
     ggml_tensor * cur_down = ggml_axpy_sparse(ctx0, gpu_down, cur_hidden, sparse_idx, neuron_idx);
     cb(cur_down, "ffn_down_sparse_gpu", il);
     ggml_build_forward_expand(gf, cur_down);
-    if (!gpu_only || !next_gpu_only) {
+    if (!spif_lc->gpu_only || (!is_last && next_spif_lc && !next_spif_lc->gpu_only) ||
+        (is_last && !first_spif_lc->gpu_only)) {
         sparkinfer_set_node_state(sched, cur_down, SPIF_SPLIT_AXPY_SPARSE);
     }
 
-    if (il < n_layer - 1 && !next_gpu_only) {
-        ggml_tensor * cur_reload_down = next_spif_lc->build_reload_exec(ctx0, cur_reload_plan, SPIF_FFN_DOWN);
-        cb(cur_reload_down, "ffn_down_reload", il + 1);
+    auto build_reload_down = [&](auto * lc, int il) {
+        ggml_tensor * cur_reload_down = lc->build_reload_exec(ctx0, cur_reload_plan, SPIF_FFN_DOWN);
+        cb(cur_reload_down, "ffn_down_reload", il);
         ggml_backend_sched_set_tensor_backend(sched, cur_reload_down, backend_gpu);
         ggml_build_forward_expand(gf, cur_reload_down);
-        next_spif_lc->reload_down = cur_reload_down;
+        lc->reload_down = cur_reload_down;
 
         sparkinfer_set_node_state(sched, cur_reload_down, SPIF_SPLIT_TAIL);
+    };
+
+    if (cur_reload_plan) {
+        if (!is_last && !next_spif_lc->gpu_only) {
+            build_reload_down(next_spif_lc, il + 1);
+        } else if (is_last && !first_spif_lc->gpu_only) {
+            build_reload_down(first_spif_lc, 0);
+        }
     }
 
-    if (!gpu_only) {
+    if (!spif_lc->gpu_only) {
         ggml_tensor * cur_down_cpu = ggml_axpy_sparse(ctx0, down, cur_hidden, sparse_idx, neuron_mask);
         cb(cur_down_cpu, "ffn_down_sparse_cpu", il);
         ggml_build_forward_expand(gf, cur_down_cpu);
-        if (il > 0) {
-            sparkinfer_register_dependency(sched, spif_lc->reload_down, cur_down, backend_gpu, SPIF_EVENT_MANUAL,
-                                           SPIF_EVENT_MANUAL);
-        }
         sparkinfer_register_dependency(sched, cur_hidden, cur_down_cpu, backend_gpu, SPIF_EVENT_RECORD,
                                        SPIF_EVENT_SYNCHRONIZE);
 

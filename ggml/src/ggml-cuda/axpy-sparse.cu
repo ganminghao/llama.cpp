@@ -196,8 +196,8 @@ static void mul_mat_axpy_cuda_sparse(const T *       x,
                                      const int64_t   num_gpu_neurons,
                                      enum ggml_prec  prec,
                                      cudaStream_t    stream) {
-    static const bool use_fast = (getenv("FAST_AXPY") != nullptr);
-    if (!use_fast) {
+    static const bool k_spif_fast_axpy = (getenv("SPIF_FAST_AXPY") != nullptr);
+    if (!k_spif_fast_axpy) {
         launch_mul_mat_axpy_cuda_sparse_reproducibel<T, float>(x, y, sparse_idx, gpu_neu_idx, dst, ncols, nrows,
                                                                src_ncols, num_gpu_neurons, stream);
         return;

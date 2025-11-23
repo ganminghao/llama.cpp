@@ -24,20 +24,21 @@ inline int get_env_int(const char * env, int default_value) {
     return default_value;
 }
 
-const static float k_dx_dfr_decay = get_env_int("DX_DFR_DECAY", 69) / 10000.0f;
+const static float  k_spif_dx_dfr_decay       = get_env_int("SPIF_DX_DFR_DECAY", 20) / 1000.0f;
+const static size_t k_spif_reload_window_size = get_env_int("SPIF_RELOAD_WINDOW_SIZE", 4);
 
 struct sparkinfer_layer_cache {
-    ggml_tensor * layer_ffn_pred_up     = nullptr;
-    ggml_tensor * layer_ffn_pred_down   = nullptr;
-    ggml_tensor * layer_ffn_pred_up_b   = nullptr;
-    ggml_tensor * layer_ffn_pred_down_b = nullptr;
+    ggml_tensor * ffn_pred_up     = nullptr;
+    ggml_tensor * ffn_pred_down   = nullptr;
+    ggml_tensor * ffn_pred_up_b   = nullptr;
+    ggml_tensor * ffn_pred_down_b = nullptr;
 
-    ggml_tensor * layer_ffn_up     = nullptr;
-    ggml_tensor * layer_ffn_gate   = nullptr;
-    ggml_tensor * layer_ffn_down   = nullptr;
-    ggml_tensor * layer_ffn_up_b   = nullptr;
-    ggml_tensor * layer_ffn_gate_b = nullptr;
-    ggml_tensor * layer_ffn_down_b = nullptr;
+    ggml_tensor * ffn_up     = nullptr;
+    ggml_tensor * ffn_gate   = nullptr;
+    ggml_tensor * ffn_down   = nullptr;
+    ggml_tensor * ffn_up_b   = nullptr;
+    ggml_tensor * ffn_gate_b = nullptr;
+    ggml_tensor * ffn_down_b = nullptr;
 
     ggml_tensor * ffn_up_cache   = nullptr;
     ggml_tensor * ffn_gate_cache = nullptr;
@@ -56,10 +57,11 @@ struct sparkinfer_layer_cache {
 
     cache_meta  layer_cm;
     copy_pair * reload_plan;
+    bool        gpu_only;
 
     static const bool k_enable_spif_reload;
-    size_t            reload_cnt      = 0;
-    size_t            reload_wnd_size = 8;
+    size_t            reload_count       = 0;
+    size_t            reload_window_size = k_spif_reload_window_size;
 
     ggml_tensor * weight_only_buf = nullptr;
     ggml_tensor * cache_only_buf  = nullptr;
@@ -160,8 +162,8 @@ struct SingleThreadExecutor {
                 cv_.notify_one();
             }
 
-            if (k_dx_dfr_decay > 0.0f && dfr_decay) {
-                dfr_decay[0] *= 1.0f + (to_move.empty() ? -k_dx_dfr_decay : k_dx_dfr_decay);
+            if (k_spif_dx_dfr_decay > 0.0f && dfr_decay) {
+                dfr_decay[0] *= 1.0f + (to_move.empty() ? -k_spif_dx_dfr_decay : k_spif_dx_dfr_decay);
                 dfr_decay[0] = std::clamp(dfr_decay[0], 0.05f, 0.95f);
                 dfr_decay[1] = 1.0f - dfr_decay[0];
             }
@@ -169,19 +171,15 @@ struct SingleThreadExecutor {
     }
 
     void stop() noexcept {
-        std::thread worker_to_join;
         {
             std::lock_guard<std::mutex> lock(mtx_);
             if (!worker_.joinable()) {
                 return;
             }
             tasks_.emplace_back(std::function<void()>{});
-            worker_to_join = std::move(worker_);
         }
         cv_.notify_one();
-        if (worker_to_join.joinable()) {
-            worker_to_join.join();
-        }
+        worker_.join();
     }
 
     struct AnchorState {

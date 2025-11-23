@@ -2517,8 +2517,8 @@ static void sparkinfer_reload_task(ggml_tensor * dst,
                                    char *        cache_base,
                                    size_t        nbytes,
                                    cudaStream_t  stream,
-                                   size_t        wnd_offset,
-                                   size_t        wnd_size,
+                                   size_t        window_offset,
+                                   size_t        window_size,
                                    copy_pair *   reload_plan) {
 #ifdef USE_NVTX
     nvtxRangeId_t id = nvtx_init(-1, dst->name, "CUDA");
@@ -2527,9 +2527,9 @@ static void sparkinfer_reload_task(ggml_tensor * dst,
 #endif
     char * weight_ptr = nullptr;
     char * cache_ptr  = nullptr;
-    for (size_t i = 0; i < wnd_size; ++i) {
-        weight_ptr = weight_base + reload_plan[wnd_offset + i].weight_idx * nbytes;
-        cache_ptr  = cache_base + reload_plan[wnd_offset + i].cache_idx * nbytes;
+    for (size_t i = 0; i < window_size; ++i) {
+        weight_ptr = weight_base + reload_plan[window_offset + i].weight_idx * nbytes;
+        cache_ptr  = cache_base + reload_plan[window_offset + i].cache_idx * nbytes;
         CUDA_CHECK(cudaMemcpyAsync(cache_ptr, weight_ptr, nbytes, cudaMemcpyHostToDevice, stream));
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -2549,34 +2549,32 @@ static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor *
     switch (spif_wt) {
         case SPIF_FFN_UP:
             {
-                weight_base = static_cast<char *>(spif_lc->layer_ffn_up->data);
+                weight_base = static_cast<char *>(spif_lc->ffn_up->data);
                 cache_base  = static_cast<char *>(spif_lc->ffn_up_cache->data);
             }
             break;
         case SPIF_FFN_GATE:
             {
-                weight_base = static_cast<char *>(spif_lc->layer_ffn_gate->data);
+                weight_base = static_cast<char *>(spif_lc->ffn_gate->data);
                 cache_base  = static_cast<char *>(spif_lc->ffn_gate_cache->data);
             }
             break;
         case SPIF_FFN_DOWN:
             {
-                weight_base = static_cast<char *>(spif_lc->layer_ffn_down->data);
+                weight_base = static_cast<char *>(spif_lc->ffn_down->data);
                 cache_base  = static_cast<char *>(spif_lc->ffn_down_cache->data);
             }
             break;
     };
 
-    const size_t grp_nbytes =
-        spif_lc->layer_cm.g * ggml_row_size(spif_lc->layer_ffn_up->type, spif_lc->layer_ffn_up->ne[0]);
-    cudaStream_t io_stream = ctx.stream(ctx.device, 1);
-
-    auto * spif_extra    = static_cast<sparkinfer_tensor_extra *>(dst->extra);
-    auto * spif_executor = static_cast<SingleThreadExecutor *>(spif_extra->spif_executor);
-    for (size_t wnd_offset = 0; wnd_offset < spif_lc->reload_cnt; wnd_offset += spif_lc->reload_wnd_size) {
-        size_t wnd_size = MIN(spif_lc->reload_wnd_size, spif_lc->reload_cnt - wnd_offset);
-        spif_executor->post(sparkinfer_reload_task, dst, weight_base, cache_base, grp_nbytes, io_stream, wnd_offset,
-                            wnd_size, spif_lc->reload_plan);
+    auto *       spif_extra    = static_cast<sparkinfer_tensor_extra *>(dst->extra);
+    auto *       spif_executor = static_cast<SingleThreadExecutor *>(spif_extra->spif_executor);
+    const size_t grp_nbytes    = spif_lc->layer_cm.g * ggml_row_size(spif_lc->ffn_up->type, spif_lc->ffn_up->ne[0]);
+    for (size_t window_offset = 0; window_offset < spif_lc->reload_count;) {
+        size_t window_size = MIN(spif_lc->reload_window_size, spif_lc->reload_count - window_offset);
+        spif_executor->post(sparkinfer_reload_task, dst, weight_base, cache_base, grp_nbytes, cudaStreamPerThread,
+                            window_offset, window_size, spif_lc->reload_plan);
+        window_offset += window_size;
     }
 
     if (spif_wt == SPIF_FFN_UP) {
@@ -2585,6 +2583,7 @@ static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor *
         spif_executor->make_anchor(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_AXPY_SPARSE,
                                    static_cast<float *>(spif_lc->dfr_decay_pack->data));
     }
+    GGML_UNUSED(ctx);
 }
 
 static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {

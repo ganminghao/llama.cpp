@@ -6616,7 +6616,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             LLAMA_LOG_INFO("%s: %12s model buffer size = %8.2f MiB\n",
                 __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get()) / 1024.0 / 1024.0);
             if (!ggml_backend_buffer_is_host(buf.get())) {
-                ml.gpu_ram_budget -= ggml_backend_buffer_get_size(buf.get());
+                ml.vram_budget -= ggml_backend_buffer_get_size(buf.get());
             }
         }
     }
@@ -6643,9 +6643,9 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
     // initialize sparkinfer cache manager
     if (!ml.spif_ms_path.empty()) {
-        ml.gpu_ram_budget -= hparams.n_ctx_train * 2 * hparams.n_layer * hparams.n_embd_k_gqa(0) * ggml_type_size(GGML_TYPE_F16);
-        GGML_ASSERT(ml.gpu_ram_budget > 0 && "no available GPU memory to initialize sparkinfer_cache_manager");
-        spif_cm        = new sparkinfer_cache_manager(ml.spif_ms_path, *this, ml.gpu_ram_budget);
+        ml.vram_budget -= hparams.n_ctx_train * 2 * hparams.n_layer * hparams.n_embd_k_gqa(0) * ggml_type_size(GGML_TYPE_F16);
+        GGML_ASSERT(ml.vram_budget > 0 && "no available GPU memory to initialize sparkinfer_cache_manager");
+        spif_cm        = new sparkinfer_cache_manager(ml.spif_ms_path, *this, ml.vram_budget);
         use_sparkinfer = true;
     }
 
@@ -7563,7 +7563,7 @@ llama_model_params llama_model_default_params() {
         /*.use_extra_bufts             =*/ true,
         /*.no_host                     =*/ false,
         /*.spif_ms_path                =*/ nullptr,
-        /*.gpu_ram_budget              =*/ 0,
+        /*.vram_budget                 =*/ 0,
     };
 
     return result;
