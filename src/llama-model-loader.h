@@ -89,7 +89,7 @@ struct llama_model_loader {
     LLM_KV      llm_kv    = LLM_KV(LLM_ARCH_UNKNOWN);
 
     std::string spif_ms_path;
-    size_t      gpu_ram_budget;
+    size_t      vram_budget;
 
     size_t size_done = 0;
     size_t size_data = 0;
@@ -99,7 +99,7 @@ struct llama_model_loader {
         const std::string & fname,
         std::vector<std::string> & splits, // optional, only need if the split does not follow naming scheme
         const std::string & spif_ms_path,
-        size_t gpu_ram_budget,
+        size_t vram_budget,
         bool use_mmap,
         bool check_tensors,
         const llama_model_kv_override * param_overrides_p,

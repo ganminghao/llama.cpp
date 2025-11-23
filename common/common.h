@@ -342,7 +342,7 @@ struct common_params {
     std::string logits_file          = ""; // file for saving *all* logits                                  // NOLINT
 
     std::string spif_ms_path         = ""; // file path for sparkinfer model split                          // NOLINT
-    size_t      gpu_ram_budget       = 0;  // gpu ram budget for loading neurons in sparkinfer              // NOLINT
+    size_t      vram_budget          = 0;  // gpu ram budget for loading neurons in sparkinfer              // NOLINT
 
     std::vector<std::string> in_files;   // all input files
     std::vector<std::string> antiprompt; // strings upon which more user input is prompted (a.k.a. reverse prompts)

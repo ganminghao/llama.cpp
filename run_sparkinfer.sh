@@ -2,20 +2,23 @@
 
 export CUDA_VISIBLE_DEVICES=0
 
-# export GPU_ONLY=8
-export DX_DFR_DECAY=69
+# export SPIF_SPLIT_DEBUG=ON
+# export SPIF_GPU_ONLY=8
+# export SPIF_DFR_EMA=ON
+export SPIF_DX_DFR_DECAY=20
+export SPIF_RELOAD_WINDOW_SIZE=4
 
 export SPIF_REORDER=ON
 export SPIF_PARALLEL=ON
 export SPIF_RELOAD=ON
-# export FAST_AXPY=ON
+export SPIF_FAST_AXPY=ON
 
 draft_model="../Llama-160M-Chat-v1.gguf"
 model="../prosparse-llama-2-7b.gguf"
 model_split="../prosparse-llama-2-7b-sparkinfer-model-split.gguf"
 prompt="Bubble sort algorithm in python:"
 
-gpu_ram_budget=10
+vram_budget=10
 threads=4
 seed=1234
 max_tokens=128
@@ -23,7 +26,7 @@ max_tokens=128
 common_opts=(
     -spif-ms "$model_split"
     -cffn --no-mmap
-    -grmb "$gpu_ram_budget"
+    -vb "$vram_budget"
     -t "$threads"
     -s "$seed"
     -p "$prompt"
