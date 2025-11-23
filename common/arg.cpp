@@ -1905,13 +1905,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_SP_MODEL_SPLIT"));
     add_opt(common_arg(
-        {"--gpu-ram-budget", "-grmb"}, "N",
+        {"--vram-budget", "-vb"}, "N",
         "sets a memory budget (in GiB) on GPU for tensors; if set to 0, no explicit limit is applied (default: 0)",
         [](common_params & params, int value) {
             if (value < 0) { throw std::invalid_argument("invalid value"); }
-            params.gpu_ram_budget = value;
+            params.vram_budget = value;
         }
-    ).set_env("LLAMA_ARG_GPU_RAM_BUDGET"));
+    ).set_env("LLAMA_ARG_VRAM_BUDGET"));
     add_opt(common_arg(
         {"--cpu-ffn", "-cffn"},
         "keep all Feed Forward Network (FFN) weights in the CPU",

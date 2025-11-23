@@ -340,9 +340,9 @@ extern "C" {
     GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
 
     // Sparkinfer: data structures and functions used in SPIF_PARALLEL
-    enum sparkinfer_event_state { SPIF_EVENT_RECORD = 1, SPIF_EVENT_WAIT, SPIF_EVENT_SYNCHRONIZE, SPIF_EVENT_MANUAL };
+    enum sparkinfer_event_state { SPIF_EVENT_RECORD = 1, SPIF_EVENT_WAIT, SPIF_EVENT_SYNCHRONIZE };
 
-    enum sparkinfer_split_flag { SPIF_SPLIT_MUL_MAT_SPARSE = 1, SPIF_SPLIT_AXPY_SPARSE, SPIF_SPLIT_TAIL };
+    enum sparkinfer_split_flag { SPIF_SPLIT_MUL_MAT_SPARSE = 1, SPIF_SPLIT_AXPY_SPARSE, SPIF_SPLIT_TAIL, SPIF_SPLIT_RELOAD };
 
     typedef struct sparkinfer_tensor_extra {
         enum sparkinfer_event_state states[GGML_MAX_SRC];
