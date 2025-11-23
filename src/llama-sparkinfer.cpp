@@ -217,10 +217,11 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
     }
     ggml_backend_tensor_set(identity, f32_mat_buf.data(), 0, ggml_nbytes(identity));
 
-    std::vector<uint8_t> src_mat_buf(n_embd * n_ff * type_size);
-    std::vector<uint8_t> dst_mat_buf(n_embd * n_ff * type_size);
-    std::vector<uint8_t> src_vec_buf(2 * n_ff * type_size);
-    std::vector<uint8_t> dst_vec_buf(2 * n_ff * type_size);
+    std::vector<uint8_t> src_max_buf(n_embd * n_ff * type_size);
+    std::vector<uint8_t> dst_max_buf(n_embd * n_ff * type_size);
+    uint8_t *            src_buf               = src_max_buf.data();
+    uint8_t *            dst_buf               = dst_max_buf.data();
+    const static bool    k_enable_spif_reorder = (getenv("SPIF_REORDER") != nullptr);
 
     auto reorder_tensor_2d = [&](ggml_tensor * tensor, std::vector<int32_t> & perm) {
         const auto n_cols        = tensor->ne[0];
@@ -229,12 +230,12 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         const auto row_stride    = tensor->nb[1];
         const auto tensor_nbytes = ggml_nbytes(tensor);
 
-        ggml_backend_tensor_get(tensor, src_mat_buf.data(), 0, tensor_nbytes);
+        ggml_backend_tensor_get(tensor, src_buf, 0, tensor_nbytes);
         for (int new_row = 0; new_row < n_rows; ++new_row) {
             const auto old_row = perm[new_row];
-            memcpy(dst_mat_buf.data() + new_row * row_stride, src_mat_buf.data() + old_row * row_stride, row_size);
+            memcpy(dst_buf + new_row * row_stride, src_buf + old_row * row_stride, row_size);
         }
-        ggml_backend_tensor_set(tensor, dst_mat_buf.data(), 0, tensor_nbytes);
+        ggml_backend_tensor_set(tensor, dst_buf, 0, tensor_nbytes);
     };
     auto reorder_tensor_1d = [&](ggml_tensor * tensor, std::vector<int32_t> & perm) {
         const auto n_elem        = tensor->ne[0];
@@ -242,15 +243,14 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         const auto elem_stride   = tensor->nb[0];
         const auto tensor_nbytes = ggml_nbytes(tensor);
 
-        ggml_backend_tensor_get(tensor, src_vec_buf.data(), 0, tensor_nbytes);
+        ggml_backend_tensor_get(tensor, src_buf, 0, tensor_nbytes);
         for (int new_i = 0; new_i < n_elem; ++new_i) {
             const auto old_i = perm[new_i];
-            memcpy(dst_vec_buf.data() + new_i * elem_stride, src_vec_buf.data() + old_i * elem_stride, elem_size);
+            memcpy(dst_buf + new_i * elem_stride, src_buf + old_i * elem_stride, elem_size);
         }
-        ggml_backend_tensor_set(tensor, dst_vec_buf.data(), 0, tensor_nbytes);
+        ggml_backend_tensor_set(tensor, dst_buf, 0, tensor_nbytes);
     };
     auto reorder_if_exists = [&](ggml_tensor * tensor, std::vector<int32_t> & perm) {
-        const static bool k_enable_spif_reorder = (getenv("SPIF_REORDER") != nullptr);
         if (sparkinfer_layer_cache::k_enable_spif_reload && k_enable_spif_reorder && tensor) {
             GGML_ASSERT(ggml_is_contiguous(tensor));
             if (tensor->ne[1] > 1) {
@@ -261,21 +261,28 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         }
     };
 
+    auto perm_vec       = std::vector<int32_t>(n_ff);
+    auto neuron_idx     = std::vector<int32_t>(n_ff);
+    auto group_maps     = std::vector<int32_t>(n_ff, -1);
+    auto neuron_mask    = std::vector<int32_t>(n_ff);
+    auto group_mask     = std::vector<float>(n_ff);
+    auto dfr_scores     = std::vector<float>(n_ff);
+    auto dfr_decay_data = std::vector<float>({ 0.67f, 1.0f - 0.67f, 1.0f });
+
     for (uint32_t il = 0; il < n_layer; ++il) {
         auto * lc           = layer_caches[il];
         auto * reorder_perm = reorder_perms[il];
 
-        std::vector<int32_t> perm(lc->layer_cm.n);
-        ggml_backend_tensor_get(reorder_perm, perm.data(), 0, ggml_nbytes(reorder_perm));
-        reorder_if_exists(lc->ffn_pred_down, perm);
-        reorder_if_exists(lc->ffn_pred_down_b, perm);
-        reorder_if_exists(lc->ffn_up, perm);
-        reorder_if_exists(lc->ffn_up_b, perm);
+        ggml_backend_tensor_get(reorder_perm, perm_vec.data(), 0, ggml_nbytes(reorder_perm));
+        reorder_if_exists(lc->ffn_pred_down, perm_vec);
+        reorder_if_exists(lc->ffn_pred_down_b, perm_vec);
+        reorder_if_exists(lc->ffn_up, perm_vec);
+        reorder_if_exists(lc->ffn_up_b, perm_vec);
         if (is_gated_mlp) {
-            reorder_if_exists(lc->ffn_gate, perm);
-            reorder_if_exists(lc->ffn_gate_b, perm);
+            reorder_if_exists(lc->ffn_gate, perm_vec);
+            reorder_if_exists(lc->ffn_gate_b, perm_vec);
         }
-        reorder_if_exists(lc->ffn_down, perm);
+        reorder_if_exists(lc->ffn_down, perm_vec);
 
         const auto cache_nbytes = ggml_nbytes(lc->ffn_up_cache);
         ggml_backend_tensor_set(lc->ffn_up_cache, lc->ffn_up->data, 0, cache_nbytes);
@@ -285,21 +292,18 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
         ggml_backend_tensor_set(lc->ffn_down_cache, lc->ffn_down->data, 0, cache_nbytes);
 
         // [0, 1, ..., m-1]
-        auto neuron_idx = std::vector<int32_t>(lc->layer_cm.m);
-        std::iota(neuron_idx.begin(), neuron_idx.end(), 0);
+        std::iota(neuron_idx.begin(), neuron_idx.begin() + lc->layer_cm.m, 0);
         // [0_0, 1_1, ..., (m/g)-1_(m/g)-1, -1_(m/g), ..., -1_(n/g)-1]
-        auto group_maps = std::vector<int32_t>(lc->layer_cm.n_g, -1);
+        std::fill_n(group_maps.begin(), lc->layer_cm.n_g, -1);
         std::iota(group_maps.begin(), group_maps.begin() + lc->layer_cm.m_g, 0);
         // [1_0, 1_1, ..., 1_m-1, 0_m, ..., 0_n-1]
-        auto neuron_mask = std::vector<int32_t>(lc->layer_cm.n);
+        std::fill_n(neuron_mask.begin(), lc->layer_cm.n, 0);
         std::fill_n(neuron_mask.begin(), lc->layer_cm.m, 1);
         // [1_0, 1_1, ..., 1_(m/g)-1, 0_(m/g), ..., 0_(n/g)-1]
-        auto group_mask = std::vector<float>(lc->layer_cm.n_g);
+        std::fill_n(group_mask.begin(), lc->layer_cm.n_g, 0.0f);
         std::fill_n(group_mask.begin(), lc->layer_cm.m_g, 1.0f);
         // [0.0_0, 0.0_1, ..., 0.0_(m/g)-1, 0_(m/g), ..., 0_(n/g)-1]
-        auto dfr_scores = std::vector<float>(lc->layer_cm.n_g);
-        std::fill_n(dfr_scores.begin(), lc->layer_cm.m_g, 0.0f);
-        auto dfr_decay_data = std::vector<float>({ 0.67f, 1.0f - 0.67f, 1.0f });
+        std::fill_n(dfr_scores.begin(), lc->layer_cm.n_g, 0.0f);
 
         ggml_backend_tensor_set(lc->neuron_idx, neuron_idx.data(), 0, ggml_nbytes(lc->neuron_idx));
         ggml_backend_tensor_set(lc->group_maps, group_maps.data(), 0, ggml_nbytes(lc->group_maps));
@@ -321,7 +325,7 @@ sparkinfer_cache_manager::~sparkinfer_cache_manager() {
         std::string out = "[";
         char        buf[32];
         for (size_t i = 0; i < n; ++i) {
-            snprintf(buf, sizeof(buf), "%.5f", data[i]);
+            snprintf(buf, sizeof(buf), "%.3f", data[i]);
             out += buf;
             if (i + 1 < n) {
                 out += ", ";
