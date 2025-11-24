@@ -779,7 +779,7 @@ const char * const LLM_KV_SPLIT_TENSORS_COUNT = "split.tensors.count";
 }
 
 // only match the ffn weights (not including the bias) in sparkinfer
-const char * const LLM_FFN_REGEX = "\\.ffn_(up|down_t|gate)\\.weight";
+const char * const LLM_FFN_REGEX = "\\.ffn_(up|down|gate)\\.weight";
 
 static std::string llm_ffn_ffn_block_regex(int idx) {
     return string_format("blk\\.%d%s", idx, LLM_FFN_REGEX);

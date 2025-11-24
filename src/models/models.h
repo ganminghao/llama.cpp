@@ -305,6 +305,10 @@ struct llm_build_llama : public llm_graph_context {
     llm_build_llama(const llama_model & model, const llm_graph_params & params);
 };
 
+struct llm_build_opt : public llm_graph_context {
+    llm_build_opt(const llama_model & model, const llm_graph_params & params);
+};
+
 struct llm_build_llama_iswa : public llm_graph_context {
     llm_build_llama_iswa(const llama_model & model, const llm_graph_params & params);
 };

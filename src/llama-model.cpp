@@ -678,6 +678,19 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                     default: type = LLM_TYPE_UNKNOWN;
                 }
             } break;
+        case LLM_ARCH_OPT:
+            {
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_EPS, hparams.f_norm_eps);
+                ml.get_key_or_arr(LLM_KV_PRED_LORA, hparams.n_pred_lora, hparams.n_layer, true);
+
+                switch (hparams.n_layer) {
+                    case 12: type = LLM_TYPE_SMALL; break;
+                    case 32: type = LLM_TYPE_7B; break;
+                    case 40: type = LLM_TYPE_13B; break;
+                    case 48: type = LLM_TYPE_30B; break;
+                    default: type = LLM_TYPE_UNKNOWN;
+                }
+            } break;
         case LLM_ARCH_LLAMA4:
             {
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -2668,20 +2681,75 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         }
 
                         // MLP predictor
-                        layer.ffn_pred_up     = create_tensor(tn(LLM_TENSOR_FFN_PRED_UP, "weight", i), { n_embd, n_pred_lora[i] }, 0);
-                        layer.ffn_pred_down   = create_tensor(tn(LLM_TENSOR_FFN_PRED_DOWN, "weight", i), { n_pred_lora[i], n_ff }, 0);
-                        layer.ffn_pred_up_b   = create_tensor(tn(LLM_TENSOR_FFN_PRED_UP, "bias", i), { n_pred_lora[i] }, TENSOR_NOT_REQUIRED);
-                        layer.ffn_pred_down_b = create_tensor(tn(LLM_TENSOR_FFN_PRED_DOWN, "bias", i), { n_ff }, TENSOR_NOT_REQUIRED);
+                        GGML_ASSERT(n_pred_lora[i] > 0 && "sparse model need predictor in its gguf file");
+                        layer.ffn_pred_up     = create_tensor(tn(LLM_TENSOR_FFN_PRED_UP, "weight", i), {n_embd, n_pred_lora[i]}, 0);
+                        layer.ffn_pred_down   = create_tensor(tn(LLM_TENSOR_FFN_PRED_DOWN, "weight", i), {n_pred_lora[i], n_ff}, 0);
+                        layer.ffn_pred_up_b   = create_tensor(tn(LLM_TENSOR_FFN_PRED_UP, "bias", i), {n_pred_lora[i]}, TENSOR_NOT_REQUIRED);
+                        layer.ffn_pred_down_b = create_tensor(tn(LLM_TENSOR_FFN_PRED_DOWN, "bias", i), {n_ff}, TENSOR_NOT_REQUIRED);
 
                         // MLP weight
-                        layer.ffn_gate   = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), { n_embd, n_ff }, 0);
-                        layer.ffn_down_t = create_tensor(tn(LLM_TENSOR_FFN_DOWN_T, "weight", i), { n_embd, n_ff }, 0);
-                        layer.ffn_up     = create_tensor(tn(LLM_TENSOR_FFN_UP, "weight", i), { n_embd, n_ff }, 0);
+                        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd, n_ff}, 0);
+                        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {n_embd, n_ff}, 0);
+                        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP, "weight", i), {n_embd, n_ff}, 0);
 
                         // optional MLP bias
-                        layer.ffn_gate_b = create_tensor(tn(LLM_TENSOR_FFN_GATE, "bias", i), { n_ff }, TENSOR_NOT_REQUIRED);
-                        layer.ffn_down_b = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "bias", i), { n_embd }, TENSOR_NOT_REQUIRED);
-                        layer.ffn_up_b   = create_tensor(tn(LLM_TENSOR_FFN_UP, "bias", i), { n_ff }, TENSOR_NOT_REQUIRED);
+                        layer.ffn_gate_b = create_tensor(tn(LLM_TENSOR_FFN_GATE, "bias", i), {n_ff}, TENSOR_NOT_REQUIRED);
+                        layer.ffn_down_b = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "bias", i), {n_embd}, TENSOR_NOT_REQUIRED);
+                        layer.ffn_up_b   = create_tensor(tn(LLM_TENSOR_FFN_UP, "bias", i), {n_ff}, TENSOR_NOT_REQUIRED);
+                    }
+                } break;
+            case LLM_ARCH_OPT:
+                {
+                    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+                    pos_embd = create_tensor(tn(LLM_TENSOR_POS_EMBD,   "weight"), {n_embd, n_ctx_train}, 0);
+
+                    // output
+                    output_norm   = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+                    output_norm_b = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "bias"),   {n_embd}, 0);
+                    output        = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+
+                    // if output is NULL, init from the input tok embed
+                    if (output == NULL) {
+                        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
+                    }
+
+                    const auto & n_pred_lora = hparams.n_pred_lora;
+
+                    for (int i = 0; i < n_layer; ++i) {
+                        auto & layer = layers[i];
+
+                        layer.attn_norm   = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+                        layer.attn_norm_b = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "bias", i),   {n_embd}, 0);
+
+                        layer.wq   = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", i), {n_embd, n_embd}, 0);
+                        layer.wk   = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd, n_embd}, 0);
+                        layer.wv   = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), {n_embd, n_embd}, 0);
+                        layer.wo   = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd, n_embd}, 0);
+
+                        layer.bq   = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "bias", i), {n_embd}, 0);
+                        layer.bk   = create_tensor(tn(LLM_TENSOR_ATTN_K,   "bias", i), {n_embd}, 0);
+                        layer.bv   = create_tensor(tn(LLM_TENSOR_ATTN_V,   "bias", i), {n_embd}, 0);
+                        layer.bo   = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "bias", i), {n_embd}, 0);
+
+                        layer.ffn_norm   = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
+                        layer.ffn_norm_b = create_tensor(tn(LLM_TENSOR_FFN_NORM, "bias", i),   {n_embd}, 0);
+
+                        // MLP predictor
+                        if (n_pred_lora[i] > 0) {
+                            layer.ffn_pred_up     = create_tensor(tn(LLM_TENSOR_FFN_PRED_UP, "weight", i), {n_embd, n_pred_lora[i]}, 0);
+                            layer.ffn_pred_down   = create_tensor(tn(LLM_TENSOR_FFN_PRED_DOWN, "weight", i), {n_pred_lora[i], n_ff}, 0);
+                            layer.ffn_pred_up_b   = create_tensor(tn(LLM_TENSOR_FFN_PRED_UP, "bias", i), {n_pred_lora[i]}, TENSOR_NOT_REQUIRED);
+                            layer.ffn_pred_down_b = create_tensor(tn(LLM_TENSOR_FFN_PRED_DOWN, "bias", i), {n_ff}, TENSOR_NOT_REQUIRED);
+
+                            layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {n_embd, n_ff}, 0);
+                        } else {
+                            layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {n_ff, n_embd}, 0);
+                        }
+
+                        layer.ffn_down_b = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "bias", i),   {n_embd}, 0);
+
+                        layer.ffn_up     = create_tensor(tn(LLM_TENSOR_FFN_UP, "weight", i), {n_embd, n_ff}, 0);
+                        layer.ffn_up_b   = create_tensor(tn(LLM_TENSOR_FFN_UP, "bias", i),   {n_ff}, 0);
                     }
                 } break;
             case LLM_ARCH_LLADA:
@@ -6642,7 +6710,8 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
     // initialize sparkinfer cache manager
     if (!ml.spif_ms_path.empty()) {
-        ml.vram_budget -= hparams.n_ctx_train * 2 * hparams.n_layer * hparams.n_embd_k_gqa(0) * ggml_type_size(GGML_TYPE_F16);
+        // kv cache nbytes: n_ctx * (k+v) * n_layer * n_head_kv * kv_type_nbytes
+        ml.vram_budget -= 4096 * 2 * hparams.n_layer * hparams.n_embd_k_gqa(0) * 2;
         GGML_ASSERT(ml.vram_budget > 0 && "no available GPU memory to initialize sparkinfer_cache_manager");
         spif_cm        = new sparkinfer_cache_manager(ml.spif_ms_path, *this, ml.vram_budget);
         use_sparkinfer = true;
@@ -7107,6 +7176,10 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
             {
                 llm = std::make_unique<llm_build_llama>(*this, params);
             } break;
+        case LLM_ARCH_OPT:
+            {
+                llm = std::make_unique<llm_build_opt>(*this, params);
+            } break;
         case LLM_ARCH_LLAMA4:
             {
                 if (hparams.swa_type == LLAMA_SWA_TYPE_NONE) {
@@ -7561,7 +7634,7 @@ llama_model_params llama_model_default_params() {
         /*.check_tensors               =*/ false,
         /*.use_extra_bufts             =*/ true,
         /*.no_host                     =*/ false,
-        /*.spif_ms_path                =*/ nullptr,
+        /*.spif_ms_path                =*/ "",
         /*.vram_budget                 =*/ 0,
     };
 
@@ -7645,6 +7718,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         // these models do not use RoPE
         case LLM_ARCH_CLIP:
         case LLM_ARCH_GPT2:
+        case LLM_ARCH_OPT:
         case LLM_ARCH_GPTJ:
         case LLM_ARCH_MPT:
         case LLM_ARCH_REFACT:

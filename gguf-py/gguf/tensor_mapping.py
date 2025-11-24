@@ -35,6 +35,8 @@ class TensorNameMap:
             "encoder",                                   # neobert
             "model.transformer.wte",                     # llada
             "embed_tokens",                              # qwen3-embedding
+            "decoder.embed_tokens",                      # opt
+            "model.decoder.embed_tokens",                # opt
         ),
 
         # Token type embeddings
@@ -61,6 +63,8 @@ class TensorNameMap:
             "transformer.wpe",                 # gpt2
             "embeddings.position_embeddings",  # bert
             "wpe",                             # gpt2
+            "decoder.embed_positions",         # opt
+            "model.decoder.embed_positions",   # opt
         ),
 
         # Output
@@ -105,6 +109,8 @@ class TensorNameMap:
             "model.norm",                              # llama4
             "model.transformer.ln_f",                  # llada
             "model.norm",                              # cogvlm
+            "decoder.final_layer_norm",                # opt
+            "model.decoder.final_layer_norm",          # opt
         ),
 
         # Rope frequencies
@@ -154,7 +160,9 @@ class TensorNameMap:
             "model.layers.{bid}.operator_norm",                     # lfm2
             "model.transformer.blocks.{bid}.attn_norm",             # llada
             "layers.{bid}.input_layernorm",                         # qwen3-embedding
-            "model.layers.{bid}.attention_layernorm"                # apertus
+            "model.layers.{bid}.attention_layernorm",               # apertus
+            "decoder.layers.{bid}.self_attn_layer_norm",            # opt
+            "model.decoder.layers.{bid}.self_attn_layer_norm",      # opt
         ),
 
         # Attention norm 2
@@ -206,6 +214,8 @@ class TensorNameMap:
             "model.transformer.blocks.{bid}.q_proj",                     # llada
             "layers.{bid}.self_attn.q_proj",                             # qwen3-embedding
             "backbone.layers.{bid}.mixer.q_proj",                        # nemotron-h
+            "decoder.layers.{bid}.self_attn.q_proj",                     # opt
+            "model.decoder.layers.{bid}.self_attn.q_proj",               # opt
         ),
 
         # Attention key
@@ -226,6 +236,8 @@ class TensorNameMap:
             "model.transformer.blocks.{bid}.k_proj",                   # llada
             "layers.{bid}.self_attn.k_proj",                           # qwen3-embedding
             "backbone.layers.{bid}.mixer.k_proj",                      # nemotron-h
+            "decoder.layers.{bid}.self_attn.k_proj",                   # opt
+            "model.decoder.layers.{bid}.self_attn.k_proj",             # opt
         ),
 
         # Attention value
@@ -245,6 +257,8 @@ class TensorNameMap:
             "model.transformer.blocks.{bid}.v_proj",                     # llada
             "layers.{bid}.self_attn.v_proj",                             # qwen3-embedding
             "backbone.layers.{bid}.mixer.v_proj",                        # nemotron-h
+            "decoder.layers.{bid}.self_attn.v_proj",                     # opt
+            "model.decoder.layers.{bid}.self_attn.v_proj",               # opt
         ),
 
         # Attention output
@@ -283,6 +297,8 @@ class TensorNameMap:
             "layers.{bid}.self_attn.o_proj",                                # qwen3-embedding
             "backbone.layers.{bid}.mixer.o_proj",                           # nemotron-h
             "model.layers.{bid}.self_attn.language_expert_dense",           # cogvlm
+            "decoder.layers.{bid}.self_attn.out_proj",                      # opt
+            "model.decoder.layers.{bid}.self_attn.out_proj",                # opt
         ),
 
         # Attention output norm
@@ -342,6 +358,8 @@ class TensorNameMap:
             "model.transformer.blocks.{bid}.ff_norm",                        # llada
             "layers.{bid}.post_attention_layernorm",                         # qwen3-embedding
             "model.layers.{bid}.feedforward_layernorm",                      # apertus
+            "decoder.layers.{bid}.final_layer_norm",                         # opt
+            "model.decoder.layers.{bid}.final_layer_norm",                   # opt
         ),
 
         # Pre feed-forward norm
@@ -438,6 +456,8 @@ class TensorNameMap:
             "layers.{bid}.mlp.up_proj",                               # qwen3-embedding
             "backbone.layers.{bid}.mixer.up_proj",                    # nemotron-h
             "model.layers.{bid}.mlp.language_mlp.up_proj",            # cogvlm
+            "decoder.layers.{bid}.fc1",                               # opt
+            "model.decoder.layers.{bid}.fc1",                         # opt
         ),
 
         MODEL_TENSOR.FFN_UP_EXP: (
@@ -544,6 +564,8 @@ class TensorNameMap:
             "layers.{bid}.mlp.down_proj",                             # qwen3-embedding
             "backbone.layers.{bid}.mixer.down_proj",                  # nemotron-h
             "model.layers.{bid}.mlp.language_mlp.down_proj",          # cogvlm
+            "decoder.layers.{bid}.fc2",                               # opt
+            "model.decoder.layers.{bid}.fc2",                         # opt
         ),
 
         MODEL_TENSOR.FFN_DOWN_EXP: (

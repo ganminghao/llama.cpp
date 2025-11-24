@@ -928,7 +928,7 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
 
     ggml_tensor * up     = layer->ffn_up;
     ggml_tensor * gate   = layer->ffn_gate;
-    ggml_tensor * down   = layer->ffn_down_t;
+    ggml_tensor * down   = layer->ffn_down;
     ggml_tensor * up_b   = layer->ffn_up_b;
     ggml_tensor * gate_b = layer->ffn_gate_b;
     ggml_tensor * down_b = layer->ffn_down_b;
@@ -1062,6 +1062,12 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
                 cb(cur_gate, "ffn_gate_relu", il);
                 cur_hidden = ggml_mul(ctx0, cur_gate, cur_up);
                 cb(cur_hidden, "ffn_gate_par", il);
+            }
+            break;
+        case LLM_ARCH_OPT:
+            {
+                cur_hidden = ggml_relu(ctx0, cur_up);
+                cb(cur_hidden, "ffn_relu", il);
             }
             break;
         default:
