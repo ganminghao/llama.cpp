@@ -13,9 +13,9 @@ export SPIF_PARALLEL=ON
 export SPIF_RELOAD=ON
 export SPIF_FAST_AXPY=ON
 
-draft_model="../Llama-160M-Chat-v1.gguf"
-model="../prosparse-llama-2-7b.gguf"
-model_split="../prosparse-llama-2-7b-sparkinfer-model-split.gguf"
+draft_model="/share/models/sparkinfer-sharing/Llama-160M-Chat-v1.gguf"
+model="/share/models/sparkinfer-sharing/prosparse-llama-2-7b.gguf"
+model_split="/share/models/sparkinfer-sharing/prosparse-llama-2-7b-sparkinfer-model-split-688.gguf"
 prompt="Bubble sort algorithm in python:"
 
 vram_budget=10
@@ -31,7 +31,6 @@ common_opts=(
     -s "$seed"
     -p "$prompt"
     -n "$max_tokens"
-    -kvu
 )
 
 cli_opts=(
@@ -40,7 +39,7 @@ cli_opts=(
 
 speculative_opts=(
     -md "$draft_model" -m "$model"
-    -ngld 999 -ngl 999
+    -ngld 999 -ngl 999 -kvu
     -co --draft-min 3 --draft-max 5
 )
 

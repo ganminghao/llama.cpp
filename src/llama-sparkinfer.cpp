@@ -162,7 +162,7 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
 
         lc->ffn_up     = layers[il].ffn_up;
         lc->ffn_gate   = layers[il].ffn_gate;
-        lc->ffn_down   = layers[il].ffn_down_t;
+        lc->ffn_down   = layers[il].ffn_down;
         lc->ffn_up_b   = layers[il].ffn_up_b;
         lc->ffn_gate_b = layers[il].ffn_gate_b;
         lc->ffn_down_b = layers[il].ffn_down_b;
@@ -174,7 +174,7 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
                 create_tensor(ctx_gpu, layers[il].ffn_gate->type, { n_embd, lc->layer_cm.m }, il, "ffn_gate.cache");
         }
         lc->ffn_down_cache =
-            create_tensor(ctx_gpu, layers[il].ffn_down_t->type, { n_embd, lc->layer_cm.m }, il, "ffn_down.cache");
+            create_tensor(ctx_gpu, layers[il].ffn_down->type, { n_embd, lc->layer_cm.m }, il, "ffn_down.cache");
 
         lc->neuron_idx  = create_tensor(ctx_gpu, GGML_TYPE_I32, { lc->layer_cm.m }, il, "ffn_neuron_idx");
         lc->group_maps  = create_tensor(ctx_cpu, GGML_TYPE_I32, { lc->layer_cm.n_g }, il, "ffn_group_maps");

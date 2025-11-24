@@ -270,7 +270,6 @@ struct llama_layer {
     // ff
     struct ggml_tensor * ffn_gate     = nullptr; // w1
     struct ggml_tensor * ffn_down     = nullptr; // w2
-    struct ggml_tensor * ffn_down_t   = nullptr; // w2.T needed by sparkinfer
     struct ggml_tensor * ffn_up       = nullptr; // w3
     struct ggml_tensor * ffn_gate_enc = nullptr;
     struct ggml_tensor * ffn_down_enc = nullptr;

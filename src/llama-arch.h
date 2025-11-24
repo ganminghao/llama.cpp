@@ -13,6 +13,7 @@ enum llm_arch {
     LLM_ARCH_LLAMA,
     LLM_ARCH_PROSPARSE_LLAMA,
     LLM_ARCH_BAMBOO,
+    LLM_ARCH_OPT,
     LLM_ARCH_LLAMA4,
     LLM_ARCH_DECI,
     LLM_ARCH_FALCON,
@@ -339,7 +340,6 @@ enum llm_tensor {
     LLM_TENSOR_FFN_PRED_DOWN,
     LLM_TENSOR_FFN_GATE,
     LLM_TENSOR_FFN_DOWN,
-    LLM_TENSOR_FFN_DOWN_T,
     LLM_TENSOR_FFN_UP,
     LLM_TENSOR_FFN_ACT,
     LLM_TENSOR_FFN_DOWN_EXP,  // split experts for backward compatibility

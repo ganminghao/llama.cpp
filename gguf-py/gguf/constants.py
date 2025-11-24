@@ -343,6 +343,7 @@ class MODEL_ARCH(IntEnum):
     LLAMA            = auto()
     PROSPARSE_LLAMA  = auto()
     BAMBOO           = auto()
+    OPT              = auto()
     LLAMA4           = auto()
     DECI             = auto()
     FALCON           = auto()
@@ -720,6 +721,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.LLAMA:            "llama",
     MODEL_ARCH.PROSPARSE_LLAMA:  "prosparse-llama",
     MODEL_ARCH.BAMBOO:           "bamboo",
+    MODEL_ARCH.OPT:              "opt",
     MODEL_ARCH.LLAMA4:           "llama4",
     MODEL_ARCH.DECI:             "deci",
     MODEL_ARCH.FALCON:           "falcon",
@@ -870,7 +872,7 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.PRED_UP:                   "blk.{bid}.ffn_pred_up",
     MODEL_TENSOR.PRED_DOWN:                 "blk.{bid}.ffn_pred_down",
     MODEL_TENSOR.FFN_GATE:                  "blk.{bid}.ffn_gate",
-    MODEL_TENSOR.FFN_DOWN:                  "blk.{bid}.ffn_down_t",
+    MODEL_TENSOR.FFN_DOWN:                  "blk.{bid}.ffn_down",
     MODEL_TENSOR.FFN_UP:                    "blk.{bid}.ffn_up",
     MODEL_TENSOR.FFN_GATE_SHEXP:            "blk.{bid}.ffn_gate_shexp",
     MODEL_TENSOR.FFN_DOWN_SHEXP:            "blk.{bid}.ffn_down_shexp",
@@ -1191,7 +1193,6 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.ATTN_V,
         MODEL_TENSOR.ATTN_OUT,
         MODEL_TENSOR.ATTN_ROT_EMBD,
-        MODEL_TENSOR.FFN_GATE_INP,
         MODEL_TENSOR.FFN_NORM,
         MODEL_TENSOR.PRED_UP,
         MODEL_TENSOR.PRED_DOWN,
@@ -1210,11 +1211,26 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.ATTN_V,
         MODEL_TENSOR.ATTN_OUT,
         MODEL_TENSOR.ATTN_ROT_EMBD,
-        MODEL_TENSOR.FFN_GATE_INP,
         MODEL_TENSOR.FFN_NORM,
         MODEL_TENSOR.PRED_UP,
         MODEL_TENSOR.PRED_DOWN,
         MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+    ],
+    MODEL_ARCH.OPT: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.POS_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.PRED_UP,
+        MODEL_TENSOR.PRED_DOWN,
         MODEL_TENSOR.FFN_DOWN,
         MODEL_TENSOR.FFN_UP,
     ],
