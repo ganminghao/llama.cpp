@@ -6,13 +6,13 @@
 // Version1: fast version for release, but unreproducible results due to atomicAdd order
 // ======================================================================================
 template <typename T, typename type_acc>
-static __global__ void mul_mat_axpy_sparse(const void * __restrict__ vx,
-                                           const float * __restrict__ y,
-                                           float * __restrict__ dst,
-                                           const int       ncols,
-                                           const int       nrows,
-                                           const int32_t * gpu_neu_idx,
-                                           const float *   sparse_idx) {
+static __global__ void mul_mat_axpy_sparse_rowwise(const void * __restrict__ vx,
+                                                   const float * __restrict__ y,
+                                                   float * __restrict__ dst,
+                                                   const int       ncols,
+                                                   const int       nrows,
+                                                   const int32_t * gpu_neu_idx,
+                                                   const float *   sparse_idx) {
     const int blk_idx      = blockIdx.x;  // block index, range from [0,nrows]
     const int token_idx    = blockIdx.y;  // parallel input index, range from [0, src1_ncols]
     const int thds_per_blk = blockDim.x;  // number of threads per block
@@ -60,19 +60,19 @@ static __global__ void mul_mat_axpy_sparse(const void * __restrict__ vx,
 }
 
 template <typename T, typename type_acc>
-static void launch_mul_mat_axpy_cuda_sparse_fast(const T *       x,
-                                                 const float *   y,
-                                                 const float *   sparse_idx,
-                                                 const int32_t * gpu_neu_idx,
-                                                 float *         dst,
-                                                 const int64_t   ncols,
-                                                 const int64_t   nrows,
-                                                 const int64_t   src_ncols,
-                                                 const int64_t   num_gpu_neurons,
-                                                 cudaStream_t    stream) {
+static void launch_mul_mat_axpy_cuda_sparse_rowwise(const T *       x,
+                                                    const float *   y,
+                                                    const float *   sparse_idx,
+                                                    const int32_t * gpu_neu_idx,
+                                                    float *         dst,
+                                                    const int64_t   ncols,
+                                                    const int64_t   nrows,
+                                                    const int64_t   src_ncols,
+                                                    const int64_t   num_gpu_neurons,
+                                                    cudaStream_t    stream) {
     const dim3 block_nums(num_gpu_neurons, src_ncols, 1);
     const dim3 block_dims(WARP_SIZE, 1, 1);
-    mul_mat_axpy_sparse<T, type_acc>
+    mul_mat_axpy_sparse_rowwise<T, type_acc>
         <<<block_nums, block_dims, 0, stream>>>(x, y, dst, ncols, nrows, gpu_neu_idx, sparse_idx);
 }
 
@@ -162,16 +162,16 @@ __global__ void mul_mat_axpy_sparse_colwise(
 }
 
 template <typename T, typename type_acc>
-static void launch_mul_mat_axpy_cuda_sparse_reproducibel(const T *       vx,
-                                                         const float *   y,
-                                                         const float *   sparse_idx,
-                                                         const int32_t * gpu_neu_idx,
-                                                         float *         dst,
-                                                         const int64_t   ncols,
-                                                         const int64_t   nrows,
-                                                         const int64_t   src_ncols,  // batch dim of y/dst
-                                                         const int64_t   num_gpu_neurons,
-                                                         cudaStream_t    stream) {
+static void launch_mul_mat_axpy_cuda_sparse_colwise(const T *       vx,
+                                                    const float *   y,
+                                                    const float *   sparse_idx,
+                                                    const int32_t * gpu_neu_idx,
+                                                    float *         dst,
+                                                    const int64_t   ncols,
+                                                    const int64_t   nrows,
+                                                    const int64_t   src_ncols,  // batch dim of y/dst
+                                                    const int64_t   num_gpu_neurons,
+                                                    cudaStream_t    stream) {
     // vector case (src_ncols == 1)
     const int vals_per_thread = 2;
     const int threads         = 64;
@@ -198,19 +198,19 @@ static void mul_mat_axpy_cuda_sparse(const T *       x,
                                      cudaStream_t    stream) {
     static const bool k_spif_fast_axpy = (getenv("SPIF_FAST_AXPY") != nullptr);
     if (!k_spif_fast_axpy) {
-        launch_mul_mat_axpy_cuda_sparse_reproducibel<T, float>(x, y, sparse_idx, gpu_neu_idx, dst, ncols, nrows,
-                                                               src_ncols, num_gpu_neurons, stream);
+        launch_mul_mat_axpy_cuda_sparse_colwise<T, float>(x, y, sparse_idx, gpu_neu_idx, dst, ncols, nrows, src_ncols,
+                                                          num_gpu_neurons, stream);
         return;
     } else {
         if constexpr (std::is_same<T, half>::value) {
             if (prec == GGML_PREC_DEFAULT) {
-                launch_mul_mat_axpy_cuda_sparse_fast<T, half>(x, y, sparse_idx, gpu_neu_idx, dst, ncols, nrows,
-                                                              src_ncols, num_gpu_neurons, stream);
+                launch_mul_mat_axpy_cuda_sparse_rowwise<T, half>(x, y, sparse_idx, gpu_neu_idx, dst, ncols, nrows,
+                                                                 src_ncols, num_gpu_neurons, stream);
                 return;
             }
         }
-        launch_mul_mat_axpy_cuda_sparse_fast<T, float>(x, y, sparse_idx, gpu_neu_idx, dst, ncols, nrows, src_ncols,
-                                                       num_gpu_neurons, stream);
+        launch_mul_mat_axpy_cuda_sparse_rowwise<T, float>(x, y, sparse_idx, gpu_neu_idx, dst, ncols, nrows, src_ncols,
+                                                          num_gpu_neurons, stream);
     }
 }
 

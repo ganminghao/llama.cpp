@@ -13,9 +13,15 @@ export SPIF_PARALLEL=ON
 export SPIF_RELOAD=ON
 export SPIF_FAST_AXPY=ON
 
-draft_model="/share/models/sparkinfer-sharing/Llama-160M-Chat-v1.gguf"
-model="/share/models/sparkinfer-sharing/prosparse-llama-2-7b.gguf"
-model_split="/share/models/sparkinfer-sharing/prosparse-llama-2-7b-sparkinfer-model-split-688.gguf"
+draft_model="/share/models/sparkinfer-sharing/opt-125m.gguf"
+model="/share/models/sparkinfer-sharing/opt-6.7b.gguf"
+model_split="/share/models/sparkinfer-sharing/opt-6.7b-sparkinfer-model-split-1024.gguf"
+# draft_model="/share/models/sparkinfer-sharing/Llama-160M-Chat-v1.gguf"
+# model="/share/models/sparkinfer-sharing/prosparse-llama-2-7b.gguf"
+# model_split="/share/models/sparkinfer-sharing/prosparse-llama-2-7b-sparkinfer-model-split-688.gguf"
+# draft_model="/share/models/sparkinfer-sharing/xxx.gguf"
+# model="/share/models/sparkinfer-sharing/bamboo-7b.gguf"
+# model_split="/share/models/sparkinfer-sharing/bamboo-7b-sparkinfer-model-split-896.gguf"
 prompt="Bubble sort algorithm in python:"
 
 vram_budget=10
