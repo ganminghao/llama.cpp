@@ -19,9 +19,12 @@ model_split="/share/models/sparkinfer-sharing/opt-6.7b-sparkinfer-model-split-10
 # draft_model="/share/models/sparkinfer-sharing/Llama-160M-Chat-v1.gguf"
 # model="/share/models/sparkinfer-sharing/prosparse-llama-2-7b.gguf"
 # model_split="/share/models/sparkinfer-sharing/prosparse-llama-2-7b-sparkinfer-model-split-688.gguf"
-# draft_model="/share/models/sparkinfer-sharing/xxx.gguf"
+# draft_model="/share/models/sparkinfer-sharing/lite-mistral-150m.gguf"
 # model="/share/models/sparkinfer-sharing/bamboo-7b.gguf"
 # model_split="/share/models/sparkinfer-sharing/bamboo-7b-sparkinfer-model-split-896.gguf"
+# draft_model="/share/models/sparkinfer-sharing/Qwen2-0.5B.gguf"
+# model="/share/models/sparkinfer-sharing/SparseQwen2-7B.gguf"
+# model_split="/share/models/sparkinfer-sharing/SparseQwen2-7B-sparkinfer-model-split-1184.gguf"
 prompt="Bubble sort algorithm in python:"
 
 vram_budget=10
