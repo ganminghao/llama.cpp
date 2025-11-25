@@ -1054,6 +1054,7 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
             }
             break;
         case LLM_ARCH_BAMBOO:
+        case LLM_ARCH_QWEN2:
             {
                 GGML_ASSERT(gate && "FFN_GATE is not found in bamboo");
                 cur_up = ggml_relu(ctx0, cur_up);

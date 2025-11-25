@@ -3356,6 +3356,12 @@ class QwenModel(TextModel):
 class Qwen2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.QWEN2
 
+    def __init__(self, *args, pred_path: Path, pred_bias: bool, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pred_path = pred_path
+        self.pred_bias = pred_bias
+        self.pred_lora = []
+
     def set_vocab(self):
         try:
             self._set_vocab_sentencepiece()
@@ -3370,6 +3376,39 @@ class Qwen2Model(TextModel):
             self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.YARN)
             self.gguf_writer.add_rope_scaling_factor(rope_scaling["factor"])
             self.gguf_writer.add_rope_scaling_orig_ctx_len(rope_scaling["original_max_position_embeddings"])
+        if self.pred_path is None:
+            for _ in range(self.hparams["num_hidden_layers"]):
+                self.pred_lora.append(0)
+        self.gguf_writer.add_pred_lora(self.pred_lora)
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        # Yield tensors from the parent class
+        yield from super().get_tensors()
+
+        if self.pred_path is not None:
+            # Collect model weight files like model_0.pt, model_1.pt, ... and sort by index
+            files = []
+            for f in os.listdir(self.pred_path):
+                m = re.fullmatch(r"model_(\d+)\.pt", f)
+                if m:
+                    files.append((int(m.group(1)), f))
+            files.sort(key=lambda x: x[0])
+            files = [f for _, f in files]
+
+            # Load all predictor files, then yield them
+            all_pred_tensors = {}
+
+            for layer_idx, file_name in enumerate(files):
+                model, pred_lora = ReluMLP.load_from_file(
+                    self.pred_path / file_name, self.pred_bias
+                )
+                self.pred_lora.append(pred_lora)
+                for name, data in model.state_dict().items():
+                    all_pred_tensors[f"blk.{layer_idx}.{name}"] = data.float()
+                del model
+
+            for name, data in all_pred_tensors.items():
+                yield name, data
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         if self.hf_arch == "Qwen2Model":
@@ -3381,7 +3420,20 @@ class Qwen2Model(TextModel):
                 or name.startswith("model.vision_tower") or name.startswith("model.multi_modal_projector"):
             # skip vision and audio tensors
             return []
-        yield from super().modify_tensors(data_torch, name, bid)
+
+        result = []
+        for tensor_name, tensor_data in super().modify_tensors(data_torch, name, bid):
+            # transpose ffn_down for neuron loading & AXPY
+            if self.pred_path is not None and "ffn_down.weight" in tensor_name:
+                tensor_data = tensor_data.transpose(1, 0).contiguous()
+            result.append((tensor_name, tensor_data))
+        return result
+
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        # force quant predictor's weights to 16-bits
+        if self.pred_path is not None and "ffn_pred" in new_name:
+            return gguf.GGMLQuantizationType.BF16
+        return super().tensor_force_quant(name, new_name, bid, n_dims)
 
 
 @ModelBase.register("DreamModel")
@@ -4451,9 +4503,9 @@ class ProSparseLlamaModel(LlamaModel):
             yield name, data
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
-        # transpose ffn_down for neuron loading & AXPY
         result = []
         for tensor_name, tensor_data in super().modify_tensors(data_torch, name, bid):
+            # transpose ffn_down for neuron loading & AXPY
             if "ffn_down.weight" in tensor_name:
                 tensor_data = tensor_data.transpose(1, 0).contiguous()
             result.append((tensor_name, tensor_data))
@@ -4562,11 +4614,12 @@ class OPTModel(TextModel):
                 yield name, data
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
-        # transpose ffn_down for neuron loading & AXPY, and modify opt positional embedding
         result = []
         for tensor_name, tensor_data in super().modify_tensors(data_torch, name, bid):
+            # modify opt positional embedding (select last 2048 dims)
             if tensor_name.startswith("position"):
                 tensor_data = tensor_data[2:].clone().contiguous()
+            # transpose ffn_down for neuron loading & AXPY
             if self.pred_path is not None and "ffn_down.weight" in tensor_name:
                 tensor_data = tensor_data.transpose(1, 0).contiguous()
             result.append((tensor_name, tensor_data))
