@@ -10645,5 +10645,24 @@ if __name__ == '__main__':
             --pred-bias \
             --outtype bf16 \
             --outfile /share/models/prosparse-7b-gguf-w-our-predictor/prosparse-7b.gguf
+
+        python convert_hf_to_gguf.py /root/autodl-tmp/models/prosparse-llama-2-7b \
+            --pred-path /root/autodl-tmp/models/prosparse-llama-2-7b-predictor-spif \
+            --pred-bias \
+            --outtype bf16 \
+            --outfile /root/autodl-tmp/models/sparkinfer/prosparse-llama-7b.gguf     
+            
+        python convert_hf_to_gguf.py /root/autodl-tmp/models/Bamboo-base-v0_1  \
+            --pred-path /root/autodl-tmp/models/Bamboo-base-v0_1-predictor-spif  \
+            --pred-bias \
+            --outtype bf16 \
+            --outfile /root/autodl-tmp/models/sparkinfer/Bamboo-7b.gguf  
+            
+        python convert_hf_to_gguf.py /root/autodl-tmp/models/opt-6.7b  \
+            --pred-path /root/autodl-tmp/models/opt-6.7b-predictor-spif     \
+            --pred-bias \
+            --outtype f16 \
+            --outfile /root/autodl-tmp/models/sparkinfer/opt-6.7b.gguf  
+    
     '''
     main()

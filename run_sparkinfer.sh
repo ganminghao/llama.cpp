@@ -5,7 +5,7 @@ export CUDA_VISIBLE_DEVICES=0
 # export SPIF_SPLIT_DEBUG=ON
 # export SPIF_GPU_ONLY=8
 # export SPIF_DFR_EMA=ON
-export SPIF_DX_DFR_DECAY=20
+export SPIF_DX_DFR_DECAY=51
 export SPIF_RELOAD_WINDOW_SIZE=4
 
 export SPIF_REORDER=ON
@@ -28,9 +28,8 @@ model_split="/share/models/sparkinfer-sharing/opt-6.7b-sparkinfer-model-split-10
 prompt="Bubble sort algorithm in python:"
 
 vram_budget=10
-threads=4
+threads=12
 seed=1234
-ctx_size=1024
 max_tokens=128
 
 common_opts=(
@@ -42,7 +41,18 @@ common_opts=(
     -p "$prompt"
     -c "$ctx_size"
     -n "$max_tokens"
+    # --temp 0.7
+    # --top-k 10
+    # --top-p 0.9
+    # --min-p 0.05
+    --repeat-penalty 1.1
+    # for coding
+    # --dry-multiplier 0.8  
+    # --dry-base 1.75
+    # --dry-allowed-length 2  
+    # --dry-penalty-last-n -1
 )
+
 
 cli_opts=(
     -m "$model" -ngl 999 -no-cnv
@@ -52,7 +62,6 @@ speculative_opts=(
     -md "$draft_model" -m "$model"
     -ngld 999 -ngl 999 -kvu
     -co --draft-min 3 --draft-max 5
-    # --repeat-penalty 1.1
 )
 
 usage() {
