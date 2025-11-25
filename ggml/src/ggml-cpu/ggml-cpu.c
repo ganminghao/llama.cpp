@@ -54,6 +54,7 @@
 // will use std::hardware_destructive_interference_size instead of hardcoding it here
 // and we'll use C++ attribute syntax.
 #define GGML_CACHE_LINE  64
+#define GGML_AXPY_LOCK_POOL_SIZE 32
 
 #if defined(__clang__) || defined(__GNUC__)
 #define GGML_CACHE_ALIGN __attribute__((aligned(GGML_CACHE_LINE)))
@@ -223,6 +224,12 @@ static inline nvtxRangeId_t nvtx_init(const int tid, const char * op, const char
 }
 #endif
 // clang-format on
+
+static bool k_spif_fast_axpy;
+
+__attribute__((constructor)) static void init_fast_axpy_flag(void) {
+    k_spif_fast_axpy = getenv("SPIF_FAST_AXPY") != NULL;
+}
 
 static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_F32] = {
@@ -2067,18 +2074,18 @@ static void ggml_axpy_avx_bf16_alphaf32(const int                         n,
     }
 }
 
-static inline void ggml_compute_forward_axpy_sparse_pro_chunk(const struct ggml_tensor * src0,
-                                                              const void *               input,
-                                                              float *                    dst,
-                                                              const char *               src0_char,
-                                                              const int32_t *            pre_mask,
-                                                              const int64_t              neu_len_char,
-                                                              const int64_t              token_len_char,
-                                                              const int64_t              dst_token_stride,
-                                                              const int64_t              col_start,
-                                                              const int64_t              col_end,
-                                                              const int64_t              current_token,
-                                                              const int64_t              num_neurons) {
+static inline void ggml_compute_forward_axpy_sparse_colwise_chunk(const struct ggml_tensor * src0,
+                                                                  const void *               input,
+                                                                  float *                    dst,
+                                                                  const char *               src0_char,
+                                                                  const int32_t *            pre_mask,
+                                                                  const int64_t              neu_len_char,
+                                                                  const int64_t              token_len_char,
+                                                                  const int64_t              dst_token_stride,
+                                                                  const int64_t              col_start,
+                                                                  const int64_t              col_end,
+                                                                  const int64_t              current_token,
+                                                                  const int64_t              num_neurons) {
     const int64_t ele_len = col_end - col_start;
     GGML_ASSERT((ele_len >= 0) && "fatal error in spliting axpy tensor");
 
@@ -2124,8 +2131,8 @@ static inline void ggml_compute_forward_axpy_sparse_pro_chunk(const struct ggml_
     }
 }
 
-// this version spilt ne00 (neuron_len) dimension for each thread to avoid atomic add
-static void ggml_compute_forward_axpy_sparse_pro(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
+static void ggml_compute_forward_axpy_sparse_colwise(const struct ggml_compute_params * params,
+                                                     struct ggml_tensor *               dst) {
     const struct ggml_tensor * src0 = dst->src[0];  // x
     const struct ggml_tensor * src1 = dst->src[1];  // input
     const struct ggml_tensor * idx  = dst->src[2];  // sparse idx
@@ -2226,7 +2233,7 @@ static void ggml_compute_forward_axpy_sparse_pro(const struct ggml_compute_param
 
     // each thread process a portion of result tensor
     // we split thinner than ne00/nth to avoid slow thread
-    int64_t K = n_tokens == 1 ? 8 : 1;
+    int64_t K             = n_tokens == 1 ? 8 : 1;
     int64_t num_chunks    = nth * K;  // aim for at least 1/2/3 chunks per thread
     int64_t ele_per_chunk = (ne00 + num_chunks - 1) / (num_chunks);
 
@@ -2256,10 +2263,191 @@ static void ggml_compute_forward_axpy_sparse_pro(const struct ggml_compute_param
 
         int64_t current_token = current_chunk / num_chunks;
 
-        ggml_compute_forward_axpy_sparse_pro_chunk(src0, input, (float *) dst->data, src0_char, pre_mask, neu_len_char,
-                                                   token_len_char, nb1, start, end, current_token, ne01);
+        ggml_compute_forward_axpy_sparse_colwise_chunk(src0, input, (float *) dst->data, src0_char, pre_mask,
+                                                       neu_len_char, token_len_char, nb1, start, end, current_token,
+                                                       ne01);
 
         current_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
+    }
+}
+
+static inline void ggml_writeback_avx(float * GGML_RESTRICT dst_ptr, const float * GGML_RESTRICT buf, const int n) {
+    int i = 0;
+// TODO: support more SIMD types
+// #if defined(__AVX512F__)
+//     const int stride = 16;
+//     for (; i + stride <= n; i += stride) {
+//         __m512 dst_v = _mm512_loadu_ps(dst_ptr + i);
+//         __m512 buf_v = _mm512_loadu_ps(buf     + i);
+//         __m512 res   = _mm512_add_ps(dst_v, buf_v);
+//         _mm512_storeu_ps(dst_ptr + i, res);
+//     }
+#if defined(__AVX2__)
+    const int stride = 8;
+    for (; i + stride <= n; i += stride) {
+        __m256 dst_v = _mm256_loadu_ps(dst_ptr + i);
+        __m256 buf_v = _mm256_loadu_ps(buf + i);
+        __m256 res   = _mm256_add_ps(dst_v, buf_v);
+        _mm256_storeu_ps(dst_ptr + i, res);
+    }
+
+#else
+    // No SIMD
+#endif
+
+    // Remainder
+    for (; i < n; i++) {
+        dst_ptr[i] += buf[i];
+    }
+}
+
+static inline void ggml_compute_forward_axpy_sparse_rowwise_chunk(const struct ggml_tensor * src0,
+                                                                  const char *               src0_ptr,
+                                                                  const void *               input,
+                                                                  const float *              idx,
+                                                                  float *                    buf,
+                                                                  const int32_t *            cpu_mask,
+                                                                  const int64_t              nb01,
+                                                                  const int64_t              nb11,
+                                                                  const int64_t              idx_nb1,
+                                                                  const int64_t              ne00,
+                                                                  const int64_t              start_neu,
+                                                                  const int64_t              end_neu,
+                                                                  const int64_t              t) {
+    if (src0->type == GGML_TYPE_BF16) {
+        const ggml_bf16_t * input_row  = (const ggml_bf16_t *) ((const char *) input + t * nb11);
+        const float *       sparse_idx = (const float *) ((const char *) idx + t * idx_nb1);
+
+        for (int64_t r = start_neu; r < end_neu; r++) {
+            if (cpu_mask[r] == 1 || sparse_idx[r] < 0.5f) {
+                continue;
+            }
+
+            float alpha = ggml_bf16_to_fp32(input_row[r]);
+            ggml_axpy_avx_bf16_alphaf32(ne00, (const ggml_bf16_t *) (src0_ptr + nb01 * r), buf, alpha);
+        }
+    } else if (src0->type == GGML_TYPE_F16) {
+        const ggml_fp16_t * input_row  = (const ggml_fp16_t *) ((const char *) input + t * nb11);
+        const float *       sparse_idx = (const float *) ((const char *) idx + t * idx_nb1);
+
+        for (int64_t r = start_neu; r < end_neu; r++) {
+            if (cpu_mask[r] == 1 || sparse_idx[r] < 0.5f) {
+                continue;
+            }
+
+            float alpha = ggml_fp16_to_fp32(input_row[r]);
+            ggml_axpy_avx_f16_alphaf32(ne00, (const ggml_fp16_t *) (src0_ptr + nb01 * r), buf, alpha);
+        }
+    } else {
+        GGML_ASSERT(false && "unsupported type in axpy_sparse");
+    }
+}
+
+static void ggml_compute_forward_axpy_sparse_rowwise(const struct ggml_compute_params * params,
+                                                     struct ggml_tensor *               dst) {
+    const struct ggml_tensor * src0 = dst->src[0];  // x
+    const struct ggml_tensor * src1 = dst->src[1];  // input
+    const struct ggml_tensor * idx  = dst->src[2];  // sparse idx
+    const struct ggml_tensor * mask = dst->src[3];  // mask
+
+    GGML_TENSOR_BINARY_OP_LOCALS;
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const enum ggml_type type = src0->type;
+
+    enum ggml_type const    vec_type   = type_traits_cpu[type].vec_dot_type;
+    const ggml_from_float_t from_float = type_traits_cpu[vec_type].from_float;
+
+    void * wdata_cur = params->wdata;
+
+    if (src1->type != vec_type) {
+        incr_ptr_aligned(&wdata_cur, ggml_row_size(vec_type, ggml_nelements(src1)), sizeof(int64_t));
+    }
+    atomic_flag * locks = (atomic_flag *) incr_ptr_aligned(&wdata_cur, sizeof(atomic_flag) * GGML_AXPY_LOCK_POOL_SIZE,
+                                                           sizeof(atomic_flag));
+    GGML_ASSERT(params->wsize >= (size_t) ((char *) wdata_cur - (char *) params->wdata));
+
+    if (ith == 0) {
+        for (int i = 0; i < GGML_AXPY_LOCK_POOL_SIZE; ++i) {
+            atomic_flag_clear(&locks[i]);
+        }
+        atomic_store_explicit(&params->threadpool->current_chunk, 0, memory_order_relaxed);
+        ggml_set_zero(dst);
+    }
+    ggml_barrier(params->threadpool);
+
+    // align precision
+    if (src1->type != vec_type) {
+        char * wdata_base = params->wdata;
+        GGML_ASSERT(ne12 == 1 && ne13 == 1);
+
+        int64_t n_elem = ggml_nelements(src1);
+        int64_t bs     = (n_elem + nth - 1) / nth;
+        int64_t start  = bs * ith;
+        int64_t end    = bs * (ith + 1) > n_elem ? n_elem : bs * (ith + 1);
+        from_float((float *) ((char *) src1->data + start * nb10),
+                   (void *) (wdata_base + start * ggml_type_size(vec_type)), end - start);
+    }
+    if (ith == 0) {
+        atomic_store_explicit(&params->threadpool->current_chunk, 0, memory_order_relaxed);
+        ggml_set_zero(dst);
+    }
+    ggml_barrier(params->threadpool);
+
+    const char *    src0_ptr   = (const char *) src0->data;
+    const int32_t * cpu_mask   = (const int32_t *) mask->data;
+    const float *   sparse_idx = (const float *) idx->data;
+
+    const int64_t n_tokens   = ne1;
+    const int64_t weight_nb1 = nb01;
+    const int64_t idx_nb1    = idx->nb[1];
+    const int64_t input_nb1  = (src1->type == vec_type) ? nb11 : ggml_type_size(vec_type) * ne10;
+
+    void * input = (src1->type == vec_type) ? src1->data : params->wdata;
+
+    float buf[ne00];
+    memset(buf, 0, ne00 * sizeof(float));
+
+    int     K                = 8;
+    int64_t chunks_per_token = nth * K;
+    int64_t neu_per_thd      = (ne01 + chunks_per_token - 1) / chunks_per_token;
+
+    int current_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
+    while (current_chunk < chunks_per_token * n_tokens) {
+        int     current_token = current_chunk / chunks_per_token;
+        int64_t start_neu     = (current_chunk % chunks_per_token) * neu_per_thd;
+        int64_t end_neu       = start_neu + neu_per_thd > ne01 ? ne01 : start_neu + neu_per_thd;
+
+        if (start_neu >= end_neu) {
+            ggml_writeback_avx((float *) dst->data + current_token * ne0, buf, ne00);
+            memset(buf, 0, ne00 * sizeof(float));  // cleaned for next token
+            current_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
+            continue;
+        }
+
+        ggml_compute_forward_axpy_sparse_rowwise_chunk(src0, src0_ptr, input, sparse_idx, buf, cpu_mask, weight_nb1,
+                                                       input_nb1, idx_nb1, ne00, start_neu, end_neu, current_token);
+
+        int next_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
+
+        bool is_last_chunk    = (next_chunk >= chunks_per_token * n_tokens);
+        bool token_transition = (next_chunk / chunks_per_token != current_token);
+
+        if (is_last_chunk || token_transition) {
+            int lock_idx = current_token % GGML_AXPY_LOCK_POOL_SIZE;
+            while (atomic_flag_test_and_set_explicit(&locks[lock_idx], memory_order_acquire)) {
+                //  _mm_pause();
+            }
+            ggml_writeback_avx((float *) dst->data + current_token * ne0, buf, ne00);
+            atomic_flag_clear_explicit(&locks[lock_idx], memory_order_release);
+            memset(buf, 0, ne00 * sizeof(float));
+            if (is_last_chunk) {
+                break;
+            }
+        }
+        current_chunk = next_chunk;
     }
 }
 
@@ -2404,7 +2592,11 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             } break;
         case GGML_OP_AXPY_SPARSE:
             {
-                ggml_compute_forward_axpy_sparse_pro(params, tensor);
+                if (k_spif_fast_axpy) {
+                    ggml_compute_forward_axpy_sparse_rowwise(params, tensor);
+                } else {
+                    ggml_compute_forward_axpy_sparse_colwise(params, tensor);
+                }
             } break;
         case GGML_OP_OUT_PROD:
             {
@@ -3428,8 +3620,11 @@ struct ggml_cplan ggml_graph_plan(
                             cur = ggml_row_size(vec_dot_type, ggml_nelements(node->src[1]));
                         }
 
-                        // premask
-                        cur += sizeof(int32_t) * ggml_nelements(node->src[2]);
+                        if (k_spif_fast_axpy) {
+                            cur += sizeof(atomic_flag) * GGML_AXPY_LOCK_POOL_SIZE; // rowwise locks
+                        } else {
+                            cur += sizeof(int32_t) * ggml_nelements(node->src[2]); // colwise premask
+                        }
                     } break;
                 case GGML_OP_OUT_PROD:
                     {
