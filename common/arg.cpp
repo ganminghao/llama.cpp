@@ -3187,6 +3187,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.use_jinja = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    
+    add_opt(common_arg(
+        {"--n-test-prompts"}, "N",
+        string_format("number of prompts used to test preformance"),
+        [](common_params & params, int value) {
+            params.n_prompts = value;
+        }
+    ));
 
     return ctx_arg;
 }

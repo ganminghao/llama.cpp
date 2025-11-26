@@ -317,6 +317,7 @@ struct common_params {
     float   yarn_beta_fast        = -1.0f; // YaRN low correction dim
     float   yarn_beta_slow        = -1.0f; // YaRN high correction dim
     int32_t yarn_orig_ctx         =     0; // YaRN original context length
+    int32_t n_prompts             =     1; // number of prompts to load from prompt file for performance test
 
     // offload params
     std::vector<ggml_backend_dev_t> devices; // devices to use for offloading
