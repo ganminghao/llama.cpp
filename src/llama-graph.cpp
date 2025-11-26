@@ -3,13 +3,13 @@
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-cparams.h"
-#include "llama-model.h"
 
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
 
+#include "llama-model.h"
 #include "llama-sparkinfer.h"
 
 #include <cassert>
@@ -903,7 +903,7 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
         ggml_tensor * dfr_scores_view =
             ggml_scale_add(ctx0, lc->dfr_scores, deltas, static_cast<float *>(lc->dfr_decay_pack->data),
                            static_cast<float>(lc->sparse_idx->ne[1] * lc->layer_cm.g), true);
-        ggml_tensor * topk_idx  = ggml_top_k(ctx0, dfr_scores_view, lc->layer_cm.m_g);
+        ggml_tensor * topk_idx  = ggml_argsort_top_k(ctx0, dfr_scores_view, lc->layer_cm.m_g);
         ggml_tensor * topk_mask = ggml_sum_cols(ctx0, ggml_get_rows(ctx0, spif_cm->identity, topk_idx));
         ggml_tensor * diff_mask = ggml_xor(ctx0, lc->group_mask, topk_mask);
 
