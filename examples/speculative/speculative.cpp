@@ -86,13 +86,16 @@ int main(int argc, char ** argv) {
 
     params.cpuparams_batch.n_threads = params.speculative.cpuparams_batch.n_threads;
     params.tensor_buft_overrides     = params.speculative.tensor_buft_overrides;
+    const std::string spif_ms_path   = params.spif_ms_path;
     params.spif_ms_path              = "";
-    params.vram_budget               = 0;
+    params.use_mmap                  = true;
 
     common_init_result llama_init_dft = common_init_from_params(params);
 
     model_dft = llama_init_dft.model.get();
     ctx_dft   = llama_init_dft.context.get();
+
+    sparkinfer_init_from_model_and_ctx(model_tgt, ctx_tgt, model_dft, ctx_dft, spif_ms_path.c_str(), params.vram_budget);
 
     const llama_vocab * vocab_tgt = llama_model_get_vocab(model_tgt);
     const llama_vocab * vocab_dft = llama_model_get_vocab(model_dft);

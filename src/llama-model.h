@@ -17,8 +17,6 @@ struct llama_cparams;
 struct llama_ubatch;
 struct llama_model_loader;
 
-struct sparkinfer_cache_manager;
-
 // available models
 enum llm_type {
     LLM_TYPE_UNKNOWN,
@@ -425,10 +423,6 @@ struct llama_model {
 
     llama_hparams hparams = {};
     llama_vocab   vocab;
-
-    // sparkinfer
-    struct sparkinfer_cache_manager * spif_cm        = nullptr;
-    bool                              use_sparkinfer = false;
 
     // for classifier models
     std::vector<std::string> classifier_labels;

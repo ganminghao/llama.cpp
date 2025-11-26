@@ -6,10 +6,6 @@ llm_build_qwen2::llm_build_qwen2(const llama_model & model, const llm_graph_para
     GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
     GGML_ASSERT(n_embd_head == hparams.n_rot);
 
-    if (model.use_sparkinfer) {
-        GGML_ASSERT(params.spif_cm != nullptr && "spif_cm must be provided when using sparkinfer");
-    }
-
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
@@ -83,13 +79,18 @@ llm_build_qwen2::llm_build_qwen2(const llama_model & model, const llm_graph_para
                 LLM_NORM_RMS, il);
         cb(cur, "ffn_norm", il);
 
-        if (model.use_sparkinfer) {
+        if (spif_cm != nullptr) {
             cur = build_sparse_ffn(cur, inp_out_ids, &model, il);
         } else {
+            ggml_tensor * tmp_ffn_down = model.layers[il].ffn_down;
+            if (model.params.use_sparkinfer) {
+                tmp_ffn_down = ggml_cont(ctx0, ggml_transpose(ctx0, tmp_ffn_down));
+            }
+
             cur = build_ffn(cur,
                     model.layers[il].ffn_up,   NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
-                    model.layers[il].ffn_down, NULL, NULL,
+                    tmp_ffn_down,              NULL, NULL,
                     NULL,
                     LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
