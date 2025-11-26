@@ -52,6 +52,7 @@ speculative_opts=(
     -md "$draft_model" -m "$model"
     -ngld 999 -ngl 999 -kvu
     -co --draft-min 3 --draft-max 5
+    # --repeat-penalty 1.1
 )
 
 usage() {
