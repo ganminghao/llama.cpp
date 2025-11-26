@@ -211,7 +211,7 @@ public:
     ggml_cgraph * graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only = false);
 
     // sparkinfer
-    sparkinfer_cache_manager * spif_cm = nullptr;
+    std::unique_ptr<sparkinfer_cache_manager> spif_cm;
 
 private:
     llm_graph_params graph_params(
