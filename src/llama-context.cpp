@@ -7,6 +7,8 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 
+#include "llama-sparkinfer.h"
+
 #include <cinttypes>
 #include <cstring>
 #include <limits>
@@ -152,10 +154,6 @@ llama_context::llama_context(
     if (cparams.n_ctx_seq > hparams.n_ctx_train) {
         LLAMA_LOG_WARN("%s: n_ctx_seq (%u) > n_ctx_train (%u) -- possible training context overflow\n",
                 __func__, cparams.n_ctx_seq, hparams.n_ctx_train);
-    }
-
-    if (!hparams.vocab_only && model.use_sparkinfer){
-        spif_cm = model.spif_cm;
     }
 
     if (!hparams.vocab_only) {
@@ -427,6 +425,7 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
+    delete spif_cm;
     ggml_opt_free(opt_ctx);
 }
 
