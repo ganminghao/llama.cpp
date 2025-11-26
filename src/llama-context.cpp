@@ -426,7 +426,6 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
-    delete spif_cm;
     ggml_opt_free(opt_ctx);
 }
 
@@ -1467,7 +1466,7 @@ llm_graph_params llama_context::graph_params(
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
         /*.res         =*/ res,
-        /*.spif_cm     =*/ spif_cm,
+        /*.spif_cm     =*/ spif_cm.get(),
     };
 }
 

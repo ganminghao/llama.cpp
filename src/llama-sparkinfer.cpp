@@ -6,6 +6,7 @@
 #include "llama-model.h"
 
 #include <cstring>
+#include <memory>
 #include <numeric>
 
 const static int k_spif_gpu_only = get_env_int("SPIF_GPU_ONLY", 0);
@@ -116,7 +117,7 @@ void sparkinfer_init_from_model_and_ctx(llama_model *   tgt_model,
     }
     vram_budget -= 16 * (1024 * 1024);  // reserved for spif_cm
 
-    tgt_ctx->spif_cm = new sparkinfer_cache_manager(tgt_model, spif_ms_path, vram_budget);
+    tgt_ctx->spif_cm = std::make_unique<sparkinfer_cache_manager>(tgt_model, spif_ms_path, vram_budget);
 }
 
 sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const char * spif_ms_path, size_t vram_budget) {
