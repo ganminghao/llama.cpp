@@ -1,9 +1,10 @@
 #pragma once
 
 #include "ggml-sparkinfer.hpp"
-#include "llama-model.h"
+#include "llama.h"
 
 #include <cstdlib>
+#include <vector>
 
 struct sparkinfer_cache_manager {
     std::vector<sparkinfer_layer_cache *> layer_caches;
@@ -18,6 +19,6 @@ struct sparkinfer_cache_manager {
     bool          is_gated_mlp = false;
     ggml_tensor * identity     = nullptr;
 
-    sparkinfer_cache_manager(const std::string & spif_ms_path, llama_model & model, size_t budget);
+    sparkinfer_cache_manager(llama_model * model, const char * spif_ms_path, size_t vram_budget);
     ~sparkinfer_cache_manager();
 };

@@ -142,6 +142,8 @@ int main(int argc, char ** argv) {
     model = llama_init.model.get();
     ctx = llama_init.context.get();
 
+    sparkinfer_init_from_model_and_ctx(model, ctx, nullptr, nullptr, params.spif_ms_path.c_str(), params.vram_budget);
+
     if (model == NULL) {
         LOG_ERR("%s: error: unable to load model\n", __func__);
         return 1;

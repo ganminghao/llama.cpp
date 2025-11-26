@@ -890,7 +890,10 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
     auto *       spif_lc       = spif_cm->layer_caches[il];
     auto *       next_spif_lc  = is_last ? nullptr : spif_cm->layer_caches[il + 1];
 
-    auto update_dfr_scores = [&](auto * lc) {
+    ggml_tensor * weight_only = nullptr;
+    ggml_tensor * cache_only  = nullptr;
+
+    auto build_dfr = [&](auto * lc) {
         ggml_tensor * mask = ggml_shifted_step(ctx0, lc->sparse_idx, -0.5f, false);
         if (lc->sparse_idx->ne[1] > 1) {
             mask = ggml_sum_cols(ctx0, mask);
@@ -900,7 +903,17 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
         ggml_tensor * dfr_scores_view =
             ggml_scale_add(ctx0, lc->dfr_scores, deltas, static_cast<float *>(lc->dfr_decay_pack->data),
                            static_cast<float>(lc->sparse_idx->ne[1] * lc->layer_cm.g), true);
-        ggml_build_forward_expand(gf, dfr_scores_view);
+        ggml_tensor * topk_idx  = ggml_top_k(ctx0, dfr_scores_view, lc->layer_cm.m_g);
+        ggml_tensor * topk_mask = ggml_sum_cols(ctx0, ggml_get_rows(ctx0, spif_cm->identity, topk_idx));
+        ggml_tensor * diff_mask = ggml_xor(ctx0, lc->group_mask, topk_mask);
+
+        weight_only = ggml_and(ctx0, topk_mask, diff_mask);
+        cb(weight_only, "ffn_weight_only", il);
+        ggml_build_forward_expand(gf, weight_only);
+        cache_only = ggml_and(ctx0, lc->group_mask, diff_mask);
+        cb(cache_only, "ffn_cache_only", il);
+        ggml_build_forward_expand(gf, cache_only);
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, topk_mask, lc->group_mask));
     };
 
     ggml_tensor * sparse_idx = spif_lc->sparse_idx;
@@ -920,10 +933,10 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
         next_spif_lc->sparse_idx = next_sparse_idx;
 
         if (!next_spif_lc->gpu_only) {
-            update_dfr_scores(next_spif_lc);
+            build_dfr(next_spif_lc);
         }
     } else if (!first_spif_lc->gpu_only) {
-        update_dfr_scores(first_spif_lc);
+        build_dfr(first_spif_lc);
     }
 
     ggml_tensor * up     = layer->ffn_up;
@@ -958,17 +971,6 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
     ggml_tensor * cur_reload_plan = nullptr;
 
     auto build_reload_up_gate = [&](auto * lc, int il) {
-        ggml_tensor * topk_idx    = ggml_top_k(ctx0, lc->dfr_scores, lc->layer_cm.m_g);
-        ggml_tensor * topk_mask   = ggml_sum_cols(ctx0, ggml_get_rows(ctx0, spif_cm->identity, topk_idx));
-        ggml_tensor * diff_mask   = ggml_xor(ctx0, lc->group_mask, topk_mask);
-        ggml_tensor * weight_only = ggml_and(ctx0, topk_mask, diff_mask);
-        cb(weight_only, "ffn_weight_only", il);
-        ggml_build_forward_expand(gf, weight_only);
-        ggml_tensor * cache_only = ggml_and(ctx0, lc->group_mask, diff_mask);
-        cb(cache_only, "ffn_cache_only", il);
-        ggml_build_forward_expand(gf, cache_only);
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, topk_mask, lc->group_mask));
-
         cur_reload_plan = lc->build_reload_plan(ctx0, weight_only, cache_only);
 
         ggml_tensor * cur_reload_gate = nullptr;

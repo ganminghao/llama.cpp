@@ -1,7 +1,9 @@
 #include "llama-sparkinfer.h"
 
 #include "ggml-cuda.h"
+#include "llama-context.h"
 #include "llama-impl.h"
+#include "llama-model.h"
 
 #include <cstring>
 #include <numeric>
@@ -86,15 +88,44 @@ void sparkinfer_layer_cache::sparkinfer_reload_plan() {
     }
 }
 
-sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_path,
-                                                   llama_model &       model,
-                                                   size_t              budget) {
+void sparkinfer_init_from_model_and_ctx(llama_model *   tgt_model,
+                                        llama_context * tgt_ctx,
+                                        llama_model *   dft_model,
+                                        llama_context * dft_ctx,
+                                        const char *    spif_ms_path,
+                                        size_t          vram_budget) {
+    (void) dft_model;
+    if (vram_budget == 0) {
+        size_t total = 0;
+        ggml_backend_cuda_get_device_memory(0, &vram_budget, &total);
+    } else if (vram_budget > 0) {
+        vram_budget = vram_budget * (1024 * 1024 * 1024);
+        for (auto * ctx : { tgt_ctx, dft_ctx }) {
+            if (ctx != nullptr) {
+                for (auto & buft_size : ctx->memory_breakdown()) {
+                    if (!ggml_backend_buft_is_host(buft_size.first)) {
+                        vram_budget -= buft_size.second.model;
+                        vram_budget -= buft_size.second.context;
+                        vram_budget -= buft_size.second.compute;
+                    }
+                }
+            }
+        }
+    } else {
+        GGML_ABORT("fatal error");
+    }
+    vram_budget -= 16 * (1024 * 1024);  // reserved for spif_cm
+
+    tgt_ctx->spif_cm = new sparkinfer_cache_manager(tgt_model, spif_ms_path, vram_budget);
+}
+
+sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const char * spif_ms_path, size_t vram_budget) {
     ggml_context *   ctx_meta    = nullptr;
     gguf_init_params gguf_params = {
         /*.no_alloc = */ false,
         /*.ctx      = */ &ctx_meta,
     };
-    gguf_context * ctx_gguf   = gguf_init_from_file(spif_ms_path.c_str(), gguf_params);
+    gguf_context * ctx_gguf   = gguf_init_from_file(spif_ms_path, gguf_params);
     const int32_t  group_size = gguf_get_val_i32(ctx_gguf, gguf_find_key(ctx_gguf, "ffn_group_size"));
     const auto *   normalized_pattern =
         static_cast<const float *>(gguf_get_arr_data(ctx_gguf, gguf_find_key(ctx_gguf, "ffn_normalized_pattern")));
@@ -107,29 +138,48 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(const std::string & spif_ms_p
     ctx_cpu = ggml_init(ctx_params);
     ctx_gpu = ggml_init(ctx_params);
 
-    const auto & layers      = model.layers;
-    const auto   n_layer     = model.hparams.n_layer;
-    const auto   n_embd      = model.hparams.n_embd;
-    const auto   n_ff        = model.hparams.n_ff(0);
-    const auto   group_count = n_ff / group_size;
-    const auto   type_size   = ggml_type_size(layers[0].ffn_up->type);
-    is_gated_mlp             = !(layers[0].ffn_gate == nullptr);
-    layer_caches             = std::vector<sparkinfer_layer_cache *>(n_layer);
+    const auto & layers    = model->layers;
+    const auto   n_layer   = model->hparams.n_layer;
+    const auto   n_embd    = model->hparams.n_embd;
+    const auto   n_ff      = model->hparams.n_ff(0);
+    const auto   type_size = ggml_type_size(layers[0].ffn_up->type);
+    is_gated_mlp           = !(layers[0].ffn_gate == nullptr);
+    layer_caches           = std::vector<sparkinfer_layer_cache *>(n_layer);
+    auto reorder_perms     = std::vector<ggml_tensor *>(n_layer);
 
-    const auto       cache_budget = budget / (n_embd * type_size) / (is_gated_mlp ? 3 : 2);
-    std::vector<int> cache_sizes(n_layer);
-    for (size_t i = 0; i < cache_sizes.size(); ++i) {
-        cache_sizes[i] =
-            std::min((static_cast<uint32_t>(cache_budget * normalized_pattern[i] / group_size) * group_size), n_ff);
+    const auto group_count = n_ff / group_size;
+    GGML_ASSERT(group_count <= 1024 && "we recommend a neuron group count of 1024 or less");
+    const int        cache_group_budget = vram_budget / (n_embd * type_size) / (is_gated_mlp ? 3 : 2) / group_size;
+    std::vector<int> cache_groups(n_layer);
+    int              used_groups = 0;
+    for (uint32_t il = 0; il < n_layer; ++il) {
+        int groups       = std::min(static_cast<uint32_t>(cache_group_budget * normalized_pattern[il]), group_count);
+        cache_groups[il] = groups;
+        used_groups += groups;
     }
-    auto reorder_perms = std::vector<ggml_tensor *>(n_layer);
+    for (int left_groups = cache_group_budget - used_groups; left_groups > 0;) {
+        int before_rr = left_groups;
+        for (uint32_t il = 0; il < n_layer && left_groups > 0; ++il) {
+            if (cache_groups[il] < static_cast<int>(group_count)) {
+                ++cache_groups[il];
+                --left_groups;
+            }
+        }
+        if (left_groups == before_rr) {
+            break;
+        }
+    }
+    std::vector<int> cache_sizes(n_layer);
+    for (uint32_t il = 0; il < n_layer; ++il) {
+        cache_sizes[il] = cache_groups[il] * group_size;
+    }
 
     // for simulation, we select some layers to store all their neurons
-    auto cs_idx = std::vector<int>(n_layer);
-    std::iota(cs_idx.begin(), cs_idx.end(), 0);
-    std::nth_element(cs_idx.begin(), cs_idx.begin() + k_spif_gpu_only, cs_idx.end(),
-                     [&](int i, int j) { return cache_sizes[i] > cache_sizes[j]; });
-    std::for_each(cs_idx.begin(), cs_idx.begin() + k_spif_gpu_only, [&](int i) { cache_sizes[i] = n_ff; });
+    // auto cs_idx = std::vector<int>(n_layer);
+    // std::iota(cs_idx.begin(), cs_idx.end(), 0);
+    // std::nth_element(cs_idx.begin(), cs_idx.begin() + k_spif_gpu_only, cs_idx.end(),
+    //                  [&](int i, int j) { return cache_sizes[i] > cache_sizes[j]; });
+    // std::for_each(cs_idx.begin(), cs_idx.begin() + k_spif_gpu_only, [&](int i) { cache_sizes[i] = n_ff; });
 
     auto create_tensor = [&](ggml_context * ctx, ggml_type type, std::vector<int64_t> ne, uint32_t il,
                              const char * name) {

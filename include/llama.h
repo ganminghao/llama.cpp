@@ -313,10 +313,7 @@ extern "C" {
         bool check_tensors;   // validate model tensor data
         bool use_extra_bufts; // use extra buffer types (used for weight repacking)
         bool no_host;         // bypass host buffer allowing extra buffers to be used
-
-        // sparkinfer
-        const char * spif_ms_path;
-        size_t       vram_budget;
+        bool use_sparkinfer;  // a flag used in llama_context graph reserve
     };
 
     // NOTE: changing the default values of parameters marked as [EXPERIMENTAL] may cause crashes or incorrect results in certain configurations
@@ -466,6 +463,11 @@ extern "C" {
                      struct llama_model * model,
             struct llama_context_params   params),
             "use llama_init_from_model instead");
+
+    LLAMA_API void sparkinfer_init_from_model_and_ctx(
+               struct llama_model * tgt_model, struct llama_context * tgt_ctx,
+               struct llama_model * dft_model, struct llama_context * dft_ctx,
+                    const char * spif_ms_path, size_t vram_budget);
 
     // Frees all allocated memory
     LLAMA_API void llama_free(struct llama_context * ctx);

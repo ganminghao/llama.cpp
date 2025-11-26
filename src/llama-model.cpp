@@ -10,8 +10,6 @@
 #include "llama-memory-hybrid.h"
 #include "llama-memory-recurrent.h"
 
-#include "llama-sparkinfer.h"
-
 #include "ggml-cpp.h"
 
 #include "models/models.h"
@@ -463,7 +461,7 @@ llama_model::llama_model(const llama_model_params & params) : params(params), pi
     pimpl->has_tensor_overrides = params.tensor_buft_overrides && params.tensor_buft_overrides[0].pattern;
 }
 
-llama_model::~llama_model() { delete spif_cm; }
+llama_model::~llama_model() {}
 
 void llama_model::load_stats(llama_model_loader & ml) {
     pimpl->n_elements = ml.n_elements;
@@ -6788,9 +6786,6 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         for (auto & buf: bufs) {
             LLAMA_LOG_INFO("%s: %12s model buffer size = %8.2f MiB\n",
                 __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get()) / 1024.0 / 1024.0);
-            if (!ggml_backend_buffer_is_host(buf.get())) {
-                ml.vram_budget -= ggml_backend_buffer_get_size(buf.get());
-            }
         }
     }
 
@@ -6812,15 +6807,6 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         for (auto & mapping : ml.mappings) {
             pimpl->mappings.emplace_back(std::move(mapping));
         }
-    }
-
-    // initialize sparkinfer cache manager
-    if (!ml.spif_ms_path.empty()) {
-        // kv cache nbytes: n_ctx * (k+v) * n_layer * n_head_kv * kv_type_nbytes
-        ml.vram_budget -= 4096 * 2 * hparams.n_layer * hparams.n_embd_k_gqa(0) * 2;
-        GGML_ASSERT(ml.vram_budget > 0 && "no available GPU memory to initialize sparkinfer_cache_manager");
-        spif_cm        = new sparkinfer_cache_manager(ml.spif_ms_path, *this, ml.vram_budget);
-        use_sparkinfer = true;
     }
 
     return true;
@@ -7745,8 +7731,7 @@ llama_model_params llama_model_default_params() {
         /*.check_tensors               =*/ false,
         /*.use_extra_bufts             =*/ true,
         /*.no_host                     =*/ false,
-        /*.spif_ms_path                =*/ "",
-        /*.vram_budget                 =*/ 0,
+        /*.use_sparkinfer              =*/ false,
     };
 
     return result;
