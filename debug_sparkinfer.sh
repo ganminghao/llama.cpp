@@ -30,6 +30,7 @@ prompt="Bubble sort algorithm in python:"
 vram_budget=10
 threads=4
 seed=1234
+ctx_size=1024
 max_tokens=128
 
 common_opts=(
@@ -39,6 +40,7 @@ common_opts=(
     -t "$threads"
     -s "$seed"
     -p "$prompt"
+    -c "$ctx_size"
     -n "$max_tokens"
 )
 
@@ -50,6 +52,7 @@ speculative_opts=(
     -md "$draft_model" -m "$model"
     -ngld 999 -ngl 999 -kvu
     -co --draft-min 3 --draft-max 5
+    # --repeat-penalty 1.1
 )
 
 usage() {
