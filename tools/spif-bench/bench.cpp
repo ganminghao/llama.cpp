@@ -111,13 +111,15 @@ void printPrefData(std::vector<PrefData> pref_data){
         const auto &data = pref_data[i];
         double prefill_throughput = data.n_prefll / (data.t_prefll_ms / 1000.0); // tokens per second
         double decode_throughput = data.n_decode / (data.t_decode_ms / 1000.0); // tokens per second
-        LOG("prompt %zu: prefill throughput = %.2f t/s, decode throughput = %.2f t/s\n",
-            i, prefill_throughput, decode_throughput);
+        LOG("prompt %zu: prefill throughput = %.2f t/s, decode throughput = %.2f t/s %s\n",
+            i, prefill_throughput, decode_throughput, i==0 ? "(WARM UP)" : "");
 
-        total_prefill_time += data.t_prefll_ms;
-        total_decode_time += data.t_decode_ms;
-        total_prefill_tokens += data.n_prefll;
-        total_decode_tokens += data.n_decode;
+        if (i != 0){
+            total_prefill_time += data.t_prefll_ms;
+            total_decode_time += data.t_decode_ms;
+            total_prefill_tokens += data.n_prefll;
+            total_decode_tokens += data.n_decode;
+        }
     }
 
     double avg_prefill_throughput = total_prefill_tokens / (total_prefill_time / 1000.0); // tokens per second
@@ -357,6 +359,9 @@ int main(int argc, char ** argv) {
 
     for(const std::string p : prompts) {
         prompt_tokens.push_back(common_tokenize(ctx, p, true, true));
+    }
+    if (!prompt_tokens.empty() && !prompt_tokens[0].empty()) {
+        embd_inp = prompt_tokens[0];
     }
     {
     //     if (params.conversation_mode && params.enable_chat_template) {
@@ -614,8 +619,9 @@ int main(int argc, char ** argv) {
     }
 
     for (int prompt_idx = 0; prompt_idx < (int) prompt_tokens.size(); prompt_idx++) {
-        printf("\n\n--- Prompt %d/%d ---\n", prompt_idx+1, (int) prompt_tokens.size());
-        embd_inp = prompt_tokens[prompt_idx];
+        printf("\n\n--- Prompt %d/%d %s---\n", prompt_idx+1, (int) prompt_tokens.size(), prompt_idx==0 ? "(warmup)" : "");
+        embd_inp.clear();
+        embd_inp.insert(embd_inp.end(), prompt_tokens[prompt_idx].begin(), prompt_tokens[prompt_idx].end());
 
         bool is_antiprompt = false;  
         bool input_echo = true;  

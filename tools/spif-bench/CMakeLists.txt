@@ -1,4 +1,4 @@
-set(TARGET llama-cli)
+set(TARGET spif-bench)
 add_executable(${TARGET} bench.cpp)
 target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

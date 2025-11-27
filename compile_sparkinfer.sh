@@ -7,7 +7,7 @@ cmake_opts=(
     -DBUILD_SHARED_LIBS=OFF
     -DGGML_CUDA=ON
     -DGGML_CUDA_GRAPHS=OFF
-    -DCMAKE_CUDA_ARCHITECTURES=86
+    -DCMAKE_CUDA_ARCHITECTURES="89-real"
 )
 
 usage() {
@@ -46,4 +46,4 @@ else
 fi
 
 cmake -B "$build_dir" -DCMAKE_BUILD_TYPE="$build_type" "${cmake_opts[@]}"
-cmake --build "$build_dir" --config "$build_type" -j"$(nproc)" --target llama-cli llama-speculative
+cmake --build "$build_dir" --config "$build_type" -j"$(nproc)" --target llama-cli llama-speculative spif-bench
