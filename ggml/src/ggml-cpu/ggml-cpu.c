@@ -194,7 +194,6 @@ typedef pthread_t ggml_thread_t;
 #include <TargetConditionals.h>
 #endif
 
-// clang-format off
 #ifdef USE_NVTX
 #include <nvtx3/nvToolsExt.h>
 
@@ -211,19 +210,13 @@ static inline nvtxRangeId_t nvtx_init(const int tid, const char * op, const char
     attr.messageType = NVTX_MESSAGE_TYPE_ASCII;
 
     char message[256];
-    if (tid >= 0) {
-        attr.color = colors[tid % num_colors];
-        snprintf(message, sizeof(message), "[t%d] %s_%s", tid, op, dev);
-    } else {
-        attr.color = 0xff00ffa0;
-        snprintf(message, sizeof(message), "%s_%s", op, dev);
-    }
+    attr.color = colors[tid % num_colors];
+    snprintf(message, sizeof(message), "[t%d] %s_%s", tid, op, dev);
     attr.message.ascii = message;
 
     return nvtxRangeStartEx(&attr);
 }
 #endif
-// clang-format on
 
 static bool k_spif_fast_axpy;
 
