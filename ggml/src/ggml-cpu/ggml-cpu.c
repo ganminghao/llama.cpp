@@ -2003,16 +2003,16 @@ static void ggml_axpy_avx_bf16_alphaf32(const int                         n,
     int                   i      = 0;
     float * GGML_RESTRICT result = (float *) vz;
 
-#if defined(__AVX512BF16__)
-    __m512 alpha_v = _mm512_set1_ps(alpha);
-    for (; i + 32 <= n; i += 32) {
-        __m512bh x_bf16 = (__m512bh) _mm512_loadu_si512((const __m512i *) (vx + i));
-        __m512   y      = _mm512_loadu_ps(result + i);
-        y               = _mm512_fmadd_ps(_mm512_cvtpbh_ps(x_bf16), alpha_v, y);
-        _mm512_storeu_ps(result + i, y);
-    }
+// #if defined(__AVX512BF16__)
+//     __m512 alpha_v = _mm512_set1_ps(alpha);
+//     for (; i + 32 <= n; i += 32) {
+//         __m512bh x_bf16 = (__m512bh) _mm512_loadu_si512((const __m512i *) (vx + i));
+//         __m512   y      = _mm512_loadu_ps(result + i);
+//         y               = _mm512_fmadd_ps(_mm512_cvtpbh_ps(x_bf16), alpha_v, y);
+//         _mm512_storeu_ps(result + i, y);
+//     }
 
-#elif defined(__AVX512F__)
+#if defined(__AVX512F__)
     // no bf16 support, convert manually
     __m512 alpha_v = _mm512_set1_ps(alpha);
 
@@ -2319,11 +2319,10 @@ static inline void ggml_compute_forward_axpy_sparse_rowwise_chunk(const struct g
         const float *       sparse_idx = (const float *) ((const char *) idx + t * idx_nb1);
 
         for (int64_t r = start_neu; r < end_neu; r++) {
-            if (cpu_mask[r] == 1 || sparse_idx[r] < 0.5f) {
+            float alpha = ggml_bf16_to_fp32(input_row[r]);
+            if (cpu_mask[r] == 1 || sparse_idx[r] < 0.5f || alpha == 0.0f) {
                 continue;
             }
-
-            float alpha = ggml_bf16_to_fp32(input_row[r]);
             ggml_axpy_avx_bf16_alphaf32(ne00, (const ggml_bf16_t *) (src0_ptr + nb01 * r), buf, alpha);
         }
     } else if (src0->type == GGML_TYPE_F16) {
@@ -2331,11 +2330,11 @@ static inline void ggml_compute_forward_axpy_sparse_rowwise_chunk(const struct g
         const float *       sparse_idx = (const float *) ((const char *) idx + t * idx_nb1);
 
         for (int64_t r = start_neu; r < end_neu; r++) {
-            if (cpu_mask[r] == 1 || sparse_idx[r] < 0.5f) {
+            float alpha = ggml_fp16_to_fp32(input_row[r]);
+            if (cpu_mask[r] == 1 || sparse_idx[r] < 0.5f || alpha == 0.0f) {
                 continue;
             }
 
-            float alpha = ggml_fp16_to_fp32(input_row[r]);
             ggml_axpy_avx_f16_alphaf32(ne00, (const ggml_fp16_t *) (src0_ptr + nb01 * r), buf, alpha);
         }
     } else {
