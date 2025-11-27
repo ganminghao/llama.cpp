@@ -80,7 +80,6 @@
 #include <string>
 #include <vector>
 
-// clang-format off
 #ifdef USE_NVTX
 #include <nvtx3/nvToolsExt.h>
 
@@ -96,20 +95,18 @@ static inline nvtxRangeId_t nvtx_init(const int tid, const char * op, const char
     attr.colorType   = NVTX_COLOR_ARGB;
     attr.messageType = NVTX_MESSAGE_TYPE_ASCII;
 
-    char message[256];
-    if (tid >= 0) {
-        attr.color = colors[tid % num_colors];
-        snprintf(message, sizeof(message), "[t%d] %s_%s", tid, op, dev);
-    } else {
+    static thread_local char message[256];
+    if (tid == -1) {
         attr.color = 0xff00ffa0;
-        snprintf(message, sizeof(message), "%s_%s", op, dev);
+    } else {
+        attr.color = 0xffff7f24;
     }
+    snprintf(message, sizeof(message), "%s_%s", op, dev);
     attr.message.ascii = message;
 
     return nvtxRangeStartEx(&attr);
 }
 #endif
-// clang-format on
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
@@ -2512,19 +2509,25 @@ static void ggml_cuda_reload_plan(ggml_backend_cuda_context & ctx, ggml_tensor *
     CUDA_CHECK(cudaStreamSynchronize(main_stream));
 }
 
-static void sparkinfer_reload_task(ggml_tensor * dst,
-                                   char *        weight_base,
-                                   char *        cache_base,
-                                   size_t        nbytes,
-                                   cudaStream_t  stream,
-                                   size_t        window_offset,
-                                   size_t        window_size,
-                                   copy_pair *   reload_plan) {
+static void sparkinfer_reload_task(char *       weight_base,
+                                   char *       cache_base,
+                                   size_t       nbytes,
+                                   cudaStream_t stream,
+                                   size_t       window_offset,
+                                   size_t       window_size,
+                                   copy_pair *  reload_plan,
+                                   const char * op_name,
+                                   const int    op_flag) {
 #ifdef USE_NVTX
-    nvtxRangeId_t id = nvtx_init(-1, dst->name, "CUDA");
+    static thread_local nvtxRangeId_t id = 0;
+    if ((op_flag & 1) && id == 0) {
+        id = nvtx_init(-2, op_name, "CUDA");
+    }
 #else
-    GGML_UNUSED(dst);
+    GGML_UNUSED(op_name);
+    GGML_UNUSED(op_flag);
 #endif
+
     char * weight_ptr = nullptr;
     char * cache_ptr  = nullptr;
     for (size_t i = 0; i < window_size; ++i) {
@@ -2533,8 +2536,12 @@ static void sparkinfer_reload_task(ggml_tensor * dst,
         CUDA_CHECK(cudaMemcpyAsync(cache_ptr, weight_ptr, nbytes, cudaMemcpyHostToDevice, stream));
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
+
 #ifdef USE_NVTX
-    nvtxRangeEnd(id);
+    if ((op_flag & 2) && id != 0) {
+        nvtxRangeEnd(id);
+        id = 0;
+    }
 #endif
 }
 
@@ -2572,8 +2579,16 @@ static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor *
     const size_t grp_nbytes    = spif_lc->layer_cm.g * ggml_row_size(spif_lc->ffn_up->type, spif_lc->ffn_up->ne[0]);
     for (size_t window_offset = 0; window_offset < spif_lc->reload_count;) {
         size_t window_size = MIN(spif_lc->reload_window_size, spif_lc->reload_count - window_offset);
-        spif_executor->post(sparkinfer_reload_task, dst, weight_base, cache_base, grp_nbytes, cudaStreamPerThread,
-                            window_offset, window_size, spif_lc->reload_plan);
+
+        int op_flag = 0;
+        if (window_offset == 0) {
+            op_flag |= 1;
+        } else if (window_offset + window_size >= spif_lc->reload_count) {
+            op_flag |= 2;
+        }
+        spif_executor->post(sparkinfer_reload_task, weight_base, cache_base, grp_nbytes, cudaStreamPerThread,
+                            window_offset, window_size, spif_lc->reload_plan, dst->name, op_flag);
+
         window_offset += window_size;
     }
 
@@ -3740,7 +3755,7 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
 #endif // NDEBUG
 
 #ifdef USE_NVTX
-                nvtxRangeId_t id = nvtx_init(-1, node->name, "CUDA");
+                auto id = nvtx_init(-1, node->name, "CUDA");
                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
                 nvtxRangeEnd(id);
 #else
