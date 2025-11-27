@@ -5,8 +5,8 @@
 // ======================================================================================
 // Version1: fast version for release, but unreproducible results due to atomicAdd order
 // ======================================================================================
-#define TILE_TOKENS 4
-#define TILE_COLS 4
+#define TILE_TOKENS 4  // we process 4 tokens per block
+#define TILE_COLS 4    // we divide ncols into 4 tiles
 template <typename T, typename type_acc>
 static __global__ void mul_mat_axpy_sparse_rowwise(const void * __restrict__ vx,
                                                    const float * __restrict__ y,
