@@ -195,7 +195,10 @@ typedef pthread_t ggml_thread_t;
 #endif
 
 #ifdef USE_NVTX
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
 #include <nvtx3/nvToolsExt.h>
+#pragma GCC diagnostic pop
 
 static const uint32_t colors[]   = { 0xff00ff00, 0xff0000ff, 0xffffff00, 0xffff00ff,
                                      0xff00ffff, 0xffff0000, 0xffffffff, 0xff808080 };

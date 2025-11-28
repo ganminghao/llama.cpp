@@ -83,10 +83,6 @@
 #ifdef USE_NVTX
 #include <nvtx3/nvToolsExt.h>
 
-static const uint32_t colors[]   = { 0xff00ff00, 0xff0000ff, 0xffffff00, 0xffff00ff,
-                                     0xff00ffff, 0xffff0000, 0xffffffff, 0xff808080 };
-static const int      num_colors = sizeof(colors) / sizeof(uint32_t);
-
 static inline nvtxRangeId_t nvtx_init(const int tid, const char * op, const char * dev) {
     nvtxEventAttributes_t attr;
     memset(&attr, 0, sizeof(attr));
@@ -1033,6 +1029,8 @@ static const ggml_backend_buffer_i ggml_backend_cuda_split_buffer_interface = {
     /* .cpy_tensor      = */ NULL,
     /* .clear           = */ ggml_backend_cuda_split_buffer_clear,
     /* .reset           = */ NULL,
+    /* .set_tensor_async= */ NULL,
+    /* .get_tensor_async= */ NULL,
 };
 
 // cuda split buffer type
