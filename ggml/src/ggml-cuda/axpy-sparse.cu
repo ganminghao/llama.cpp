@@ -5,37 +5,57 @@
 // ======================================================================================
 // Version1: fast version for release, but unreproducible results due to atomicAdd order
 // ======================================================================================
+#define TILE_TOKENS 4  // we process 4 tokens per block
+#define TILE_COLS   4  // we divide ncols into 4 tiles
+
 template <typename T, typename type_acc>
 static __global__ void mul_mat_axpy_sparse_rowwise(const void * __restrict__ vx,
                                                    const float * __restrict__ y,
                                                    float * __restrict__ dst,
                                                    const int       ncols,
                                                    const int       nrows,
+                                                   const int       src_ncols,
                                                    const int32_t * gpu_neu_idx,
                                                    const float *   sparse_idx) {
-    const int blk_idx      = blockIdx.x;  // block index, range from [0,nrows]
-    const int token_idx    = blockIdx.y;  // parallel input index, range from [0, src1_ncols]
-    const int thds_per_blk = blockDim.x;  // number of threads per block
+    const int blk_idx      = blockIdx.x;   // block index, range from [0,num_gpu_neurons)]
+    const int token_ty     = threadIdx.y;
+    const int thds_per_blk = blockDim.x;   // number of threads per block
+    const int tid          = threadIdx.x;  // range from [0,31]
+    const int col_len      = (ncols + TILE_COLS - 1) / TILE_COLS;
+    const int col_start    = blockIdx.z * col_len;
+    const int col_end      = min(col_start + col_len, ncols);
 
-    y += token_idx * nrows;
-    dst += token_idx * ncols;
-    sparse_idx += token_idx * nrows;
+    const int token_idx = blockIdx.y * blockDim.y + token_ty;
 
-    const int neu = gpu_neu_idx ? gpu_neu_idx[blk_idx] : blk_idx;
-    const int tid = threadIdx.x;  // range from [0,31]
-
-    float alpha_fp32 = y[neu];
-
-    if (sparse_idx[neu] < 0.5f) {
+    if (token_idx >= src_ncols) {
         return;
     }
 
-    const int VALS_PER_ITER = 2;  // each iter compute 2 vals consequently, we should not modify this
+    const float * y_tok      = y + token_idx * nrows;
+    float *       dst_tok    = dst + token_idx * ncols;
+    const float * sparse_tok = sparse_idx + token_idx * nrows;
+
+    const int neu = gpu_neu_idx ? gpu_neu_idx[blk_idx] : blk_idx;
+
+    float alpha_fp32 = y_tok[neu];
+
+    // init sharemem
+    extern __shared__ float shmem[];
+    for (int i = tid; i < col_len; i += thds_per_blk) {
+        shmem[token_ty * col_len + i] = 0.0f;
+    }
+    __syncthreads();
+
+    if (sparse_tok[neu] < 0.5f || alpha_fp32 == 0.0f) {
+        return;
+    }
+
+    const int VALS_PER_ITER = 2;
     const int iter_stride   = VALS_PER_ITER * thds_per_blk;
 
-    for (int i = 0; i < ncols; i += iter_stride) {
+    for (int i = col_start; i < col_end; i += iter_stride) {
         const int col  = i + VALS_PER_ITER * tid;
-        const int vx_i = blk_idx * ncols + col;  // vx index, vx was store in "blk_idx way", so indice it with blk_idx
+        const int vx_i = blk_idx * ncols + col;
 
         float2 v;
         if constexpr (std::is_same<T, half>::value) {
@@ -46,16 +66,18 @@ static __global__ void mul_mat_axpy_sparse_rowwise(const void * __restrict__ vx,
             const __nv_bfloat16 * x = reinterpret_cast<const __nv_bfloat16 *>(vx);
             v.x                     = __bfloat162float(x[vx_i + 0]);
             v.y                     = __bfloat162float(x[vx_i + 1]);
-        } else if constexpr (std::is_same<T, float>::value) {
+        } else {
             const float * x = reinterpret_cast<const float *>(vx);
             v.x             = x[vx_i + 0];
             v.y             = x[vx_i + 1];
-        } else {
-            static_assert(std::is_same<T, void>::value, "unsupported type for axpy_sparse");
         }
-
-        atomicAdd(&dst[col + 0], v.x * alpha_fp32);
-        atomicAdd(&dst[col + 1], v.y * alpha_fp32);
+        int local = col - col_start;
+        shmem[token_ty * col_len + local + 0] += v.x * alpha_fp32;
+        shmem[token_ty * col_len + local + 1] += v.y * alpha_fp32;
+    }
+    // write back to global memory
+    for (int i = tid; i < col_len; i += thds_per_blk) {
+        atomicAdd(&dst_tok[col_start + i], shmem[token_ty * col_len + i]);
     }
 }
 
@@ -70,10 +92,21 @@ static void launch_mul_mat_axpy_cuda_sparse_rowwise(const T *       x,
                                                     const int64_t   src_ncols,
                                                     const int64_t   num_gpu_neurons,
                                                     cudaStream_t    stream) {
-    const dim3 block_nums(num_gpu_neurons, src_ncols, 1);
-    const dim3 block_dims(WARP_SIZE, 1, 1);
-    mul_mat_axpy_sparse_rowwise<T, type_acc>
-        <<<block_nums, block_dims, 0, stream>>>(x, y, dst, ncols, nrows, gpu_neu_idx, sparse_idx);
+    dim3      block_nums;
+    dim3      block_dims;
+    size_t    share_mem_size = 0;
+    const int col_len        = (ncols + TILE_COLS - 1) / TILE_COLS;
+    if (src_ncols == 1) {
+        block_nums     = dim3(num_gpu_neurons, 1, TILE_COLS);
+        block_dims     = dim3(WARP_SIZE, 1, 1);
+        share_mem_size = col_len * sizeof(float);
+    } else {
+        block_nums     = dim3(num_gpu_neurons, (src_ncols + TILE_TOKENS - 1) / TILE_TOKENS, TILE_COLS);
+        block_dims     = dim3(WARP_SIZE, TILE_TOKENS, 1);
+        share_mem_size = col_len * TILE_TOKENS * sizeof(float);
+    }
+    mul_mat_axpy_sparse_rowwise<T, type_acc><<<block_nums, block_dims, share_mem_size, stream>>>(
+        x, y, dst, ncols, nrows, src_ncols, gpu_neu_idx, sparse_idx);
 }
 
 // ======================================================================================

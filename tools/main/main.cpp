@@ -83,7 +83,316 @@ static void sigint_handler(int signo) {
 }
 #endif
 
+struct bench_perf_data {
+    int    n_prefill    = 0;
+    double t_prefill_ms = 0.0;
+    int    n_decode     = 0;
+    double t_decode_ms  = 0.0;
+};
+
+static bench_perf_data bench_perf_collect(struct llama_context * ctx) {
+    bench_perf_data         result;
+    llama_perf_context_data perf = llama_perf_context(ctx);
+    result.n_prefill             = perf.n_p_eval;
+    result.t_prefill_ms          = perf.t_p_eval_ms;
+    result.n_decode              = perf.n_eval;
+    result.t_decode_ms           = perf.t_eval_ms;
+    return result;
+}
+
+static void bench_perf_print(const std::vector<bench_perf_data> & data) {
+    double total_prefill_tokens = 0.0;
+    double total_decode_tokens  = 0.0;
+    double total_prefill_ms     = 0.0;
+    double total_decode_ms      = 0.0;
+
+    LOG("\n\n");
+
+    for (size_t i = 0; i < data.size(); ++i) {
+        const bench_perf_data & d = data[i];
+
+        double prefill_tps = (d.n_prefill > 0 && d.t_prefill_ms > 0.0) ? d.n_prefill / (d.t_prefill_ms / 1000.0) : 0.0;
+        double decode_tps  = (d.n_decode > 0 && d.t_decode_ms > 0.0) ? d.n_decode / (d.t_decode_ms / 1000.0) : 0.0;
+
+        LOG("prompt %zu: prefill = %.2f tok/s, decode = %.2f tok/s %s\n", i, prefill_tps, decode_tps,
+            i == 0 ? "(WARM UP)" : "");
+
+        if (i > 0) {
+            total_prefill_tokens += d.n_prefill;
+            total_decode_tokens += d.n_decode;
+            total_prefill_ms += d.t_prefill_ms;
+            total_decode_ms += d.t_decode_ms;
+        }
+    }
+
+    if (data.size() > 1 && total_prefill_ms > 0.0 && total_decode_ms > 0.0) {
+        double avg_prefill_tps = total_prefill_tokens / (total_prefill_ms / 1000.0);
+        double avg_decode_tps  = total_decode_tokens / (total_decode_ms / 1000.0);
+
+        LOG("\nTotal (excluding warmup):\n");
+        LOG("prefill = %.2f tok/s, decode = %.2f tok/s\n", avg_prefill_tps, avg_decode_tps);
+    }
+
+    LOG("\n\n");
+}
+
+static std::vector<std::string> bench_load_prompts(const std::string & path, int n_prompts) {
+    std::vector<std::string> prompts;
+
+    std::ifstream fin(path);
+    if (!fin.is_open()) {
+        LOG_ERR("Failed to open prompt file: %s\n", path.c_str());
+        return prompts;
+    }
+
+    std::string line;
+    int         count = 0;
+    while (std::getline(fin, line) && (n_prompts == -1 || count < n_prompts)) {
+        if (!line.empty()) {
+            prompts.push_back(line);
+            ++count;
+        }
+    }
+
+    return prompts;
+}
+
+static int bench_main(int argc, char ** argv) {
+    common_params params;
+    g_params = &params;
+
+    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_MAIN, print_usage)) {
+        return 1;
+    }
+
+    common_init();
+
+    auto & sparams = params.sampling;
+
+    // save choice to use color for later
+    console::init(params.simple_io, params.use_color);
+    atexit([]() { console::cleanup(); });
+
+    if (params.embedding) {
+        LOG_ERR("************\n");
+        LOG_ERR(
+            "%s: bench mode does not support embedding, please use the 'embedding' tool for embedding calculations\n",
+            __func__);
+        LOG_ERR("************\n\n");
+        return 1;
+    }
+
+    if (params.n_ctx != 0 && params.n_ctx < 8) {
+        LOG_WRN("%s: warning: minimum context size is 8, using minimum size.\n", __func__);
+        params.n_ctx = 8;
+    }
+
+    if (params.rope_freq_base != 0.0) {
+        LOG_WRN("%s: warning: changing RoPE frequency base to %g.\n", __func__, params.rope_freq_base);
+    }
+
+    if (params.rope_freq_scale != 0.0) {
+        LOG_WRN("%s: warning: scaling RoPE frequency by %g.\n", __func__, params.rope_freq_scale);
+    }
+
+    LOG_INF("%s: llama backend init\n", __func__);
+
+    llama_backend_init();
+    llama_numa_init(params.numa);
+
+    llama_model *    model = nullptr;
+    llama_context *  ctx   = nullptr;
+    common_sampler * smpl  = nullptr;
+
+    g_model = &model;
+    g_ctx   = &ctx;
+    g_smpl  = &smpl;
+
+    // load the model and apply lora adapter, if any
+    LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
+    common_init_result llama_init = common_init_from_params(params);
+
+    model = llama_init.model.get();
+    ctx   = llama_init.context.get();
+
+    if (model == NULL || ctx == NULL) {
+        LOG_ERR("%s: error: unable to load model or context\n", __func__);
+        return 1;
+    }
+
+    sparkinfer_init_from_model_and_ctx(model, ctx, nullptr, nullptr, params.spif_ms_path.c_str(), params.vram_budget);
+
+    llama_memory_t      mem         = llama_get_memory(ctx);
+    const llama_vocab * vocab       = llama_model_get_vocab(model);
+    const int           n_ctx       = llama_n_ctx(ctx);
+    const int           n_ctx_train = llama_model_n_ctx_train(model);
+
+    if (n_ctx > n_ctx_train) {
+        LOG_WRN("%s: model was trained on only %d context tokens (%d specified)\n", __func__, n_ctx_train, n_ctx);
+    }
+
+    // start measuring performance timings from here
+    llama_perf_context_reset(ctx);
+
+    LOG_INF("%s: llama threadpool init, n_threads = %d\n", __func__, (int) params.cpuparams.n_threads);
+
+    auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (!cpu_dev) {
+        LOG_ERR("%s: no CPU backend found\n", __func__);
+        return 1;
+    }
+
+    auto * reg = ggml_backend_dev_backend_reg(cpu_dev);
+    auto * ggml_threadpool_new_fn =
+        (decltype(ggml_threadpool_new) *) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_new");
+    auto * ggml_threadpool_free_fn =
+        (decltype(ggml_threadpool_free) *) ggml_backend_reg_get_proc_address(reg, "ggml_threadpool_free");
+
+    struct ggml_threadpool_params tpp_batch = ggml_threadpool_params_from_cpu_params(params.cpuparams_batch);
+    struct ggml_threadpool_params tpp       = ggml_threadpool_params_from_cpu_params(params.cpuparams);
+
+    set_process_priority(params.cpuparams.priority);
+
+    struct ggml_threadpool * threadpool_batch = NULL;
+    if (!ggml_threadpool_params_match(&tpp, &tpp_batch)) {
+        threadpool_batch = ggml_threadpool_new_fn(&tpp_batch);
+        if (!threadpool_batch) {
+            LOG_ERR("%s: batch threadpool create failed : n_threads %d\n", __func__, tpp_batch.n_threads);
+            return 1;
+        }
+
+        // start the non-batch threadpool in the paused state
+        tpp.paused = true;
+    }
+
+    struct ggml_threadpool * threadpool = ggml_threadpool_new_fn(&tpp);
+    if (!threadpool) {
+        LOG_ERR("%s: threadpool create failed : n_threads %d\n", __func__, tpp.n_threads);
+        return 1;
+    }
+
+    llama_attach_threadpool(ctx, threadpool, threadpool_batch);
+
+    // sampler
+    smpl = common_sampler_init(model, sparams);
+    if (!smpl) {
+        LOG_ERR("%s: failed to initialize sampling subsystem\n", __func__);
+        return 1;
+    }
+
+    LOG_INF("sampler seed: %u\n", common_sampler_get_seed(smpl));
+    LOG_INF("sampler params: \n%s\n", sparams.print().c_str());
+    LOG_INF("sampler chain: %s\n", common_sampler_print(smpl).c_str());
+    LOG_INF("bench: n_ctx = %d, n_batch = %d, n_predict = %d\n", n_ctx, params.n_batch, params.n_predict);
+
+    // bench requires a prompt file
+    if (params.prompt_file.empty()) {
+        LOG_ERR("%s: bench mode requires --prompt-file\n", __func__);
+        return 1;
+    }
+
+    std::vector<std::string> prompts = bench_load_prompts(params.prompt_file, params.n_prompts);
+
+    if (prompts.empty()) {
+        LOG_ERR("%s: no prompts loaded from '%s'\n", __func__, params.prompt_file.c_str());
+        return 1;
+    }
+
+    std::vector<bench_perf_data> perf_data_list;
+
+    // run each prompt
+    for (size_t prompt_idx = 0; prompt_idx < prompts.size(); ++prompt_idx) {
+        const std::string & prompt_str = prompts[prompt_idx];
+
+        std::vector<llama_token> embd_inp = common_tokenize(ctx, prompt_str, /*add_bos=*/true, /*special=*/true);
+
+        if (embd_inp.empty()) {
+            LOG_WRN("%s: prompt %zu is empty, skipping\n", __func__, prompt_idx);
+            continue;
+        }
+
+        if ((int) embd_inp.size() > n_ctx - 4) {
+            LOG_WRN("%s: prompt %zu is too long (%zu tokens, max %d), truncating\n", __func__, prompt_idx,
+                    embd_inp.size(), n_ctx - 4);
+            embd_inp.resize(n_ctx - 4);
+        }
+
+        printf("\n\n--- Prompt %zu/%zu %s---\n", prompt_idx + 1, prompts.size(), prompt_idx == 0 ? "(warmup)" : "");
+
+        LOG(">> %s\n", prompt_str.c_str());
+        LOG("<< ");
+
+        // reset KV cache & perf & sampler for this prompt
+        llama_memory_seq_rm(mem, -1, -1, -1);
+        llama_perf_context_reset(ctx);
+        common_sampler_reset(smpl);
+
+        int n_past   = 0;
+        int n_remain = params.n_predict;
+
+        // prefill: feed all input tokens
+        for (int i = 0; i < (int) embd_inp.size();) {
+            int n_eval = (int) embd_inp.size() - i;
+            if (n_eval > params.n_batch) {
+                n_eval = params.n_batch;
+            }
+
+            if (llama_decode(ctx, llama_batch_get_one(&embd_inp[i], n_eval))) {
+                LOG_ERR("%s: llama_decode (prefill) failed\n", __func__);
+                return 1;
+            }
+
+            n_past += n_eval;
+            i += n_eval;
+        }
+
+        // decode loop, print generated tokens
+        while (n_remain != 0) {
+            // NOTE: id must be non-const, because llama_batch_get_one takes llama_token*
+            llama_token id = common_sampler_sample(smpl, ctx, -1);
+            common_sampler_accept(smpl, id, /*accept_grammar=*/true);
+
+            if (llama_vocab_is_eog(vocab, id)) {
+                break;
+            }
+
+            const std::string token_str = common_token_to_piece(ctx, id, /*special=*/false);
+            LOG("%s", token_str.c_str());
+
+            if (llama_decode(ctx, llama_batch_get_one(&id, 1))) {
+                LOG_ERR("%s: llama_decode (decode) failed\n", __func__);
+                return 1;
+            }
+
+            ++n_past;
+            --n_remain;
+        }
+
+        LOG("\n");
+
+        // collect performance data for this prompt
+        perf_data_list.push_back(bench_perf_collect(ctx));
+    }
+
+    bench_perf_print(perf_data_list);
+
+    common_sampler_free(smpl);
+
+    llama_backend_free();
+
+    ggml_threadpool_free_fn(threadpool);
+    ggml_threadpool_free_fn(threadpool_batch);
+
+    return 0;
+}
+
 int main(int argc, char ** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--n-bench-prompts") == 0 || strcmp(argv[i], "-nps") == 0) {
+            return bench_main(argc, argv);
+        }
+    }
+
     common_params params;
     g_params = &params;
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_MAIN, print_usage)) {

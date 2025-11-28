@@ -1912,12 +1912,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_SP_MODEL_SPLIT"));
     add_opt(common_arg(
         {"--vram-budget", "-vb"}, "N",
-        "sets a memory budget (in GiB) on GPU for tensors; if set to 0, no explicit limit is applied (default: 0)",
+        "sets a memory budget (in GiB) on GPU for tensors; if set to 0, no explicit limit is applied",
         [](common_params & params, int value) {
             if (value < 0) { throw std::invalid_argument("invalid value"); }
             params.vram_budget = value;
         }
     ).set_env("LLAMA_ARG_VRAM_BUDGET"));
+    add_opt(common_arg(
+        {"--n-bench-prompts", "-nps"}, "N",
+        "number of prompts loaded from --prompt-file in bench mode",
+        [](common_params & params, int value) {
+            if (value <= 0) { throw std::invalid_argument("invalid value"); }
+            params.n_prompts = value;
+        }
+    ).set_env("LLAMA_ARG_N_PROMPTS"));
     add_opt(common_arg(
         {"--cpu-ffn", "-cffn"},
         "keep all Feed Forward Network (FFN) weights in the CPU",
