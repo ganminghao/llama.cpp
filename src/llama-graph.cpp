@@ -1004,6 +1004,7 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
     if (!spif_lc->gpu_only) {
         ggml_tensor * cur_up_cpu = ggml_mul_mat_sparse(ctx0, up, cur, sparse_idx, neuron_mask);
         cb(cur_up_cpu, "ffn_up_sparse_cpu", il);
+        ggml_backend_sched_set_tensor_backend(sched, cur_up_cpu, backend_cpu);
         ggml_build_forward_expand(gf, cur_up_cpu);
         sparkinfer_register_dependency(sched, cur, cur_up_cpu, backend_gpu, SPIF_EVENT_RECORD, SPIF_EVENT_SYNCHRONIZE);
         if (il == 0) {
@@ -1015,6 +1016,7 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
         if (gate) {
             cur_gate_cpu = ggml_mul_mat_sparse(ctx0, gate, cur, sparse_idx, neuron_mask);
             cb(cur_gate_cpu, "ffn_gate_sparse_cpu", il);
+            ggml_backend_sched_set_tensor_backend(sched, cur_gate_cpu, backend_cpu);
             ggml_build_forward_expand(gf, cur_gate_cpu);
         }
 
@@ -1106,6 +1108,7 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
     if (!spif_lc->gpu_only) {
         ggml_tensor * cur_down_cpu = ggml_axpy_sparse(ctx0, down, cur_hidden, sparse_idx, neuron_mask);
         cb(cur_down_cpu, "ffn_down_sparse_cpu", il);
+        ggml_backend_sched_set_tensor_backend(sched, cur_down_cpu, backend_cpu);
         ggml_build_forward_expand(gf, cur_down_cpu);
         sparkinfer_register_dependency(sched, cur_hidden, cur_down_cpu, backend_gpu, SPIF_EVENT_RECORD,
                                        SPIF_EVENT_SYNCHRONIZE);
