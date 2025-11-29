@@ -3429,12 +3429,6 @@ class Qwen2Model(TextModel):
             result.append((tensor_name, tensor_data))
         return result
 
-    def tensor_force_quant(self, name, new_name, bid, n_dims):
-        # force quant predictor's weights to 16-bits
-        if self.pred_path is not None and "ffn_pred" in new_name:
-            return gguf.GGMLQuantizationType.BF16
-        return super().tensor_force_quant(name, new_name, bid, n_dims)
-
 
 @ModelBase.register("DreamModel")
 class DreamModel(TextModel):
@@ -4491,7 +4485,6 @@ class ReluMLP(torch.nn.Module):
 @ModelBase.register("ProSparseLlamaForCausalLM")
 class ProSparseLlamaModel(LlamaModel):
     model_arch = gguf.MODEL_ARCH.PROSPARSE_LLAMA
-    undo_permute = True
 
     def __init__(self, *args, pred_path: Path, pred_bias: bool, **kwargs):
         assert pred_path is not None, "sparse model need predictor ckpt!"
@@ -4541,17 +4534,10 @@ class ProSparseLlamaModel(LlamaModel):
             result.append((tensor_name, tensor_data))
         return result
 
-    def tensor_force_quant(self, name, new_name, bid, n_dims):
-        # force quant predictor's weights to 16-bits
-        if "ffn_pred" in new_name:
-            return gguf.GGMLQuantizationType.BF16
-        return super().tensor_force_quant(name, new_name, bid, n_dims)
-
 
 @ModelBase.register("BambooForCausalLM")
 class BambooModel(ProSparseLlamaModel):
     model_arch = gguf.MODEL_ARCH.BAMBOO
-    undo_permute = True
     # Bamboo uses the same architecture as ProSparseLlama
 
 
@@ -4590,7 +4576,6 @@ class GPT2Model(TextModel):
 @ModelBase.register("OPTForCausalLM")
 class OPTModel(TextModel):
     model_arch = gguf.MODEL_ARCH.OPT
-    undo_permute = True
 
     def __init__(self, *args, pred_path: Path, pred_bias: bool, **kwargs):
         super().__init__(*args, **kwargs)
@@ -4654,12 +4639,6 @@ class OPTModel(TextModel):
                 tensor_data = tensor_data.transpose(1, 0).contiguous()
             result.append((tensor_name, tensor_data))
         return result
-
-    def tensor_force_quant(self, name, new_name, bid, n_dims):
-        # force quant predictor's weights to 16-bits
-        if self.pred_path is not None and "ffn_pred" in new_name:
-            return gguf.GGMLQuantizationType.F16
-        return super().tensor_force_quant(name, new_name, bid, n_dims)
 
 
 @ModelBase.register("PhiForCausalLM")

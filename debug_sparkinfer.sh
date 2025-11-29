@@ -3,7 +3,6 @@
 export CUDA_VISIBLE_DEVICES=0
 
 # export SPIF_SPLIT_DEBUG=ON
-# export SPIF_GPU_ONLY=8
 # export SPIF_DFR_EMA=ON
 export SPIF_DX_DFR_DECAY=20
 export SPIF_RELOAD_WINDOW_SIZE=4
@@ -15,6 +14,7 @@ export SPIF_FAST_AXPY=ON
 
 draft_model="/share/models/sparkinfer-sharing/opt-125m.gguf"
 model="/share/models/sparkinfer-sharing/opt-6.7b.gguf"
+# model="/share/models/sparkinfer-sharing/opt-6.7b-q8_0.gguf"
 model_split="/share/models/sparkinfer-sharing/opt-6.7b-sparkinfer-model-split-1024.gguf"
 # draft_model="/share/models/sparkinfer-sharing/Llama-160M-Chat-v1.gguf"
 # model="/share/models/sparkinfer-sharing/prosparse-llama-2-7b.gguf"

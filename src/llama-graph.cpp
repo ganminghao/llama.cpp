@@ -904,7 +904,7 @@ ggml_tensor * llm_graph_context::build_sparse_ffn(ggml_tensor *       cur,
             ggml_scale_add(ctx0, lc->dfr_scores, deltas, static_cast<float *>(lc->dfr_decay_pack->data),
                            static_cast<float>(lc->sparse_idx->ne[1] * lc->layer_cm.g), true);
         ggml_tensor * topk_idx  = ggml_argsort_top_k(ctx0, dfr_scores_view, lc->layer_cm.m_g);
-        ggml_tensor * topk_mask = ggml_sum_cols(ctx0, ggml_get_rows(ctx0, spif_cm->identity, topk_idx));
+        ggml_tensor * topk_mask = ggml_sum_cols(ctx0, ggml_get_rows(ctx0, spif_cm->group_identity, topk_idx));
         ggml_tensor * diff_mask = ggml_xor(ctx0, lc->group_mask, topk_mask);
 
         weight_only = ggml_and(ctx0, topk_mask, diff_mask);
