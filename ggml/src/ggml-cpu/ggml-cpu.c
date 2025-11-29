@@ -2070,6 +2070,73 @@ static void ggml_axpy_avx_bf16_alphaf32(const int                         n,
     }
 }
 
+static void ggml_axpy_avx_q8_0_alphaf32(const int                         n,
+                                        const void * GGML_RESTRICT        vx,
+                                        void * GGML_RESTRICT              vz,
+                                        float                             alpha) {
+    const int n_blocks = n / 32; // Q8_0 块大小为 32
+    const block_q8_0 * GGML_RESTRICT x = (const block_q8_0 *) vx;
+    float * GGML_RESTRICT            result = (float *) vz;
+    int i = 0;
+
+#if defined(__AVX2__)
+    for (; i < n_blocks; ++i) {
+        // 1. 计算当前块的有效缩放因子: (block_scale * alpha)
+        float d_val = ggml_fp16_to_fp32(x[i].d);
+        __m256 v_scale = _mm256_set1_ps(d_val * alpha);
+
+        // 2. 加载 32 个 int8 量化值
+        __m256i v_qs = _mm256_loadu_si256((const __m256i *) x[i].qs);
+
+        // 3. 将 int8 转换为 int16 (低128位和高128位分别扩展)
+        // low 16 bytes -> 16 x int16
+        __m256i v_qs_lo_16 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(v_qs));
+        // high 16 bytes -> 16 x int16
+        __m256i v_qs_hi_16 = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(v_qs, 1));
+
+        // 4. 将 int16 转换为 float 并计算 (需要 4 个 __m256 寄存器来存 32 个 float)
+        
+        // --- 处理前 16 个元素 (v_qs_lo_16) ---
+        // 0-7
+        __m256 v_x0 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_castsi256_si128(v_qs_lo_16)));
+        // 8-15
+        __m256 v_x1 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_extracti128_si256(v_qs_lo_16, 1)));
+
+        // --- 处理后 16 个元素 (v_qs_hi_16) ---
+        // 16-23
+        __m256 v_x2 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_castsi256_si128(v_qs_hi_16)));
+        // 24-31
+        __m256 v_x3 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_extracti128_si256(v_qs_hi_16, 1)));
+
+        // 5. 加载 dst (Y)，执行 FMA，并写回
+        float * res_ptr = result + i * 32;
+
+        __m256 v_y0 = _mm256_loadu_ps(res_ptr + 0);
+        __m256 v_y1 = _mm256_loadu_ps(res_ptr + 8);
+        __m256 v_y2 = _mm256_loadu_ps(res_ptr + 16);
+        __m256 v_y3 = _mm256_loadu_ps(res_ptr + 24);
+
+        v_y0 = _mm256_fmadd_ps(v_x0, v_scale, v_y0);
+        v_y1 = _mm256_fmadd_ps(v_x1, v_scale, v_y1);
+        v_y2 = _mm256_fmadd_ps(v_x2, v_scale, v_y2);
+        v_y3 = _mm256_fmadd_ps(v_x3, v_scale, v_y3);
+
+        _mm256_storeu_ps(res_ptr + 0,  v_y0);
+        _mm256_storeu_ps(res_ptr + 8,  v_y1);
+        _mm256_storeu_ps(res_ptr + 16, v_y2);
+        _mm256_storeu_ps(res_ptr + 24, v_y3);
+    }
+#else
+    for (; i < n_blocks; ++i) {
+        float d_val = ggml_fp16_to_fp32(x[i].d);
+        for (int j = 0; j < 32; ++j) {
+            result[i * 32 + j] += x[i].qs[j] * d_val * alpha;
+        }
+    }
+#endif
+}
+
+
 static inline void ggml_compute_forward_axpy_sparse_colwise_chunk(const struct ggml_tensor * src0,
                                                                   const void *               input,
                                                                   float *                    dst,
@@ -2310,9 +2377,9 @@ static inline void ggml_compute_forward_axpy_sparse_rowwise_chunk(const struct g
                                                                   const int64_t              start_neu,
                                                                   const int64_t              end_neu,
                                                                   const int64_t              t) {
+    const float *       sparse_idx = (const float *) ((const char *) idx + t * idx_nb1);
     if (src0->type == GGML_TYPE_BF16) {
         const ggml_bf16_t * input_row  = (const ggml_bf16_t *) ((const char *) input + t * nb11);
-        const float *       sparse_idx = (const float *) ((const char *) idx + t * idx_nb1);
 
         for (int64_t r = start_neu; r < end_neu; r++) {
             float alpha = ggml_bf16_to_fp32(input_row[r]);
@@ -2324,7 +2391,6 @@ static inline void ggml_compute_forward_axpy_sparse_rowwise_chunk(const struct g
         }
     } else if (src0->type == GGML_TYPE_F16) {
         const ggml_fp16_t * input_row  = (const ggml_fp16_t *) ((const char *) input + t * nb11);
-        const float *       sparse_idx = (const float *) ((const char *) idx + t * idx_nb1);
 
         for (int64_t r = start_neu; r < end_neu; r++) {
             float alpha = ggml_fp16_to_fp32(input_row[r]);
@@ -2334,7 +2400,23 @@ static inline void ggml_compute_forward_axpy_sparse_rowwise_chunk(const struct g
 
             ggml_axpy_avx_f16_alphaf32(ne00, (const ggml_fp16_t *) (src0_ptr + nb01 * r), buf, alpha);
         }
-    } else {
+    } else if (src0->type == GGML_TYPE_Q8_0) {
+        const float * input_row = (const float *) ((const char *) input + t * nb11);
+
+        for (int64_t r = start_neu; r < end_neu; r++) {
+            float alpha = input_row[r];
+            
+            if (cpu_mask[r] == 1 || sparse_idx[r] < 0.5f || alpha == 0.0f) {
+                continue;
+            }
+
+            ggml_axpy_avx_q8_0_alphaf32(ne00, 
+                                        (const void *) (src0_ptr + nb01 * r), 
+                                        buf, 
+                                        alpha);
+        }
+    }
+    else {
         GGML_ASSERT(false && "unsupported type in axpy_sparse");
     }
 }
@@ -2375,7 +2457,7 @@ static void ggml_compute_forward_axpy_sparse_rowwise(const struct ggml_compute_p
     ggml_barrier(params->threadpool);
 
     // align precision
-    if (src1->type != vec_type) {
+    if (src1->type != vec_type && src0->type != GGML_TYPE_Q8_0) {
         char * wdata_base = params->wdata;
         GGML_ASSERT(ne12 == 1 && ne13 == 1);
 
