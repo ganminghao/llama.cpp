@@ -3429,12 +3429,6 @@ class Qwen2Model(TextModel):
             result.append((tensor_name, tensor_data))
         return result
 
-    def tensor_force_quant(self, name, new_name, bid, n_dims):
-        # force quant predictor's weights to 16-bits
-        if self.pred_path is not None and "ffn_pred" in new_name:
-            return gguf.GGMLQuantizationType.BF16
-        return super().tensor_force_quant(name, new_name, bid, n_dims)
-
 
 @ModelBase.register("DreamModel")
 class DreamModel(TextModel):
@@ -4239,6 +4233,36 @@ class Qwen3MoeModel(Qwen2MoeModel):
         super().set_vocab()
 
 
+@ModelBase.register("Qwen3NextForCausalLM")
+class Qwen3NextModel(Qwen2MoeModel):
+    model_arch = gguf.MODEL_ARCH.QWEN3NEXT
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        self.gguf_writer.add_ssm_conv_kernel(self.hparams["linear_conv_kernel_dim"])
+        self.gguf_writer.add_ssm_state_size(self.hparams["linear_key_head_dim"])
+        self.gguf_writer.add_ssm_group_count(self.hparams["linear_num_key_heads"])
+        self.gguf_writer.add_ssm_time_step_rank(self.hparams["linear_num_value_heads"])
+        self.gguf_writer.add_ssm_inner_size(self.hparams["linear_value_head_dim"] * self.hparams["linear_num_value_heads"])
+        if (rope_dim := self.hparams.get("head_dim")) is None:
+            rope_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
+        self.gguf_writer.add_rope_dimension_count(int(rope_dim * self.hparams.get("partial_rotary_factor", 0.25)))
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if name.startswith("mtp"):
+            return [] # ignore MTP layers for now
+        if name.endswith(".A_log"):
+            data_torch = -torch.exp(data_torch)
+        elif name.endswith(".dt_bias"):
+            name = name.rpartition(".dt_bias")[0] + ".dt_proj.bias"
+        elif "conv1d" in name:
+            data_torch = data_torch.squeeze()
+        elif name.endswith("norm.weight") and not name.endswith("linear_attn.norm.weight"):
+            data_torch = data_torch + 1
+
+        yield from super().modify_tensors(data_torch, name, bid)
+
+
 @ModelBase.register("RND1")
 class RND1Model(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.RND1
@@ -4461,7 +4485,6 @@ class ReluMLP(torch.nn.Module):
 @ModelBase.register("ProSparseLlamaForCausalLM")
 class ProSparseLlamaModel(LlamaModel):
     model_arch = gguf.MODEL_ARCH.PROSPARSE_LLAMA
-    undo_permute = True
 
     def __init__(self, *args, pred_path: Path, pred_bias: bool, **kwargs):
         assert pred_path is not None, "sparse model need predictor ckpt!"
@@ -4511,17 +4534,10 @@ class ProSparseLlamaModel(LlamaModel):
             result.append((tensor_name, tensor_data))
         return result
 
-    def tensor_force_quant(self, name, new_name, bid, n_dims):
-        # force quant predictor's weights to 16-bits
-        if "ffn_pred" in new_name:
-            return gguf.GGMLQuantizationType.BF16
-        return super().tensor_force_quant(name, new_name, bid, n_dims)
-
 
 @ModelBase.register("BambooForCausalLM")
 class BambooModel(ProSparseLlamaModel):
     model_arch = gguf.MODEL_ARCH.BAMBOO
-    undo_permute = True
     # Bamboo uses the same architecture as ProSparseLlama
 
 
@@ -4560,7 +4576,6 @@ class GPT2Model(TextModel):
 @ModelBase.register("OPTForCausalLM")
 class OPTModel(TextModel):
     model_arch = gguf.MODEL_ARCH.OPT
-    undo_permute = True
 
     def __init__(self, *args, pred_path: Path, pred_bias: bool, **kwargs):
         super().__init__(*args, **kwargs)
@@ -4624,12 +4639,6 @@ class OPTModel(TextModel):
                 tensor_data = tensor_data.transpose(1, 0).contiguous()
             result.append((tensor_name, tensor_data))
         return result
-
-    def tensor_force_quant(self, name, new_name, bid, n_dims):
-        # force quant predictor's weights to 16-bits
-        if self.pred_path is not None and "ffn_pred" in new_name:
-            return gguf.GGMLQuantizationType.F16
-        return super().tensor_force_quant(name, new_name, bid, n_dims)
 
 
 @ModelBase.register("PhiForCausalLM")

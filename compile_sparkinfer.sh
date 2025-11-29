@@ -46,4 +46,4 @@ else
 fi
 
 cmake -B "$build_dir" -DCMAKE_BUILD_TYPE="$build_type" "${cmake_opts[@]}"
-cmake --build "$build_dir" --config "$build_type" -j"$(nproc)" --target llama-cli llama-speculative
+cmake --build "$build_dir" --config "$build_type" -j"$(nproc)" --target llama-cli llama-speculative llama-quantize

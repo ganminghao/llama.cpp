@@ -359,9 +359,9 @@ struct common_params {
     std::string lookup_cache_dynamic = ""; // path of dynamic ngram cache file for lookup decoding          // NOLINT
     std::string logits_file          = ""; // file for saving *all* logits                                  // NOLINT
 
-    std::string spif_ms_path         = ""; // file path for sparkinfer model split                          // NOLINT
-    size_t      vram_budget          = 0;  // gpu ram budget for loading neurons in sparkinfer              // NOLINT
-    size_t      n_prompts            = 1;  // number of prompts to load from file for performance bench     // NOLINT
+    std::string spif_ms_path;
+    int64_t     vram_budget = 0;
+    size_t      n_prompts   = 1;
 
     std::vector<std::string> in_files;   // all input files
     std::vector<std::string> antiprompt; // strings upon which more user input is prompted (a.k.a. reverse prompts)

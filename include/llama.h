@@ -467,7 +467,7 @@ extern "C" {
     LLAMA_API void sparkinfer_init_from_model_and_ctx(
                struct llama_model * tgt_model, struct llama_context * tgt_ctx,
                struct llama_model * dft_model, struct llama_context * dft_ctx,
-                    const char * spif_ms_path, size_t vram_budget);
+                    const char * spif_ms_path, int64_t vram_budget);
 
     // Frees all allocated memory
     LLAMA_API void llama_free(struct llama_context * ctx);

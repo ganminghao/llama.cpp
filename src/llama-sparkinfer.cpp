@@ -9,8 +9,6 @@
 #include <memory>
 #include <numeric>
 
-const static int k_spif_gpu_only = get_env_int("SPIF_GPU_ONLY", 0);
-
 const bool sparkinfer_layer_cache::k_enable_spif_reload =
     (getenv("SPIF_PARALLEL") != nullptr && getenv("SPIF_RELOAD") != nullptr);
 
@@ -94,11 +92,13 @@ void sparkinfer_init_from_model_and_ctx(llama_model *   tgt_model,
                                         llama_model *   dft_model,
                                         llama_context * dft_ctx,
                                         const char *    spif_ms_path,
-                                        size_t          vram_budget) {
+                                        int64_t         vram_budget) {
     (void) dft_model;
     if (vram_budget == 0) {
-        size_t total = 0;
-        ggml_backend_cuda_get_device_memory(0, &vram_budget, &total);
+        size_t free;
+        size_t total;
+        ggml_backend_cuda_get_device_memory(0, &free, &total);
+        vram_budget = free;
     } else if (vram_budget > 0) {
         vram_budget = vram_budget * (1024 * 1024 * 1024);
         for (auto * ctx : { tgt_ctx, dft_ctx }) {
@@ -115,20 +115,23 @@ void sparkinfer_init_from_model_and_ctx(llama_model *   tgt_model,
     } else {
         GGML_ABORT("fatal error");
     }
-    vram_budget -= 16 * (1024 * 1024);  // reserved for spif_cm
+    vram_budget -= 16 * (1024 * 1024);
+    GGML_ASSERT(vram_budget > 0 && "no vram left for initializing cache manager");
 
     tgt_ctx->spif_cm = std::make_unique<sparkinfer_cache_manager>(tgt_model, spif_ms_path, vram_budget);
 }
 
-sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const char * spif_ms_path, size_t vram_budget) {
+sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model,
+                                                   const char *  spif_ms_path,
+                                                   int64_t       vram_budget) {
     ggml_context *   ctx_meta    = nullptr;
     gguf_init_params gguf_params = {
         /*.no_alloc = */ false,
         /*.ctx      = */ &ctx_meta,
     };
-    gguf_context * ctx_gguf   = gguf_init_from_file(spif_ms_path, gguf_params);
-    const int32_t  group_size = gguf_get_val_i32(ctx_gguf, gguf_find_key(ctx_gguf, "ffn_group_size"));
-    const auto *   normalized_pattern =
+    gguf_context * ctx_gguf    = gguf_init_from_file(spif_ms_path, gguf_params);
+    const int32_t  n_ffn_group = gguf_get_val_i32(ctx_gguf, gguf_find_key(ctx_gguf, "ffn_group_size"));
+    const float *  f_ffn_norm_pattern =
         static_cast<const float *>(gguf_get_arr_data(ctx_gguf, gguf_find_key(ctx_gguf, "ffn_normalized_pattern")));
 
     ggml_init_params ctx_params = {
@@ -139,69 +142,61 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const ch
     ctx_cpu = ggml_init(ctx_params);
     ctx_gpu = ggml_init(ctx_params);
 
-    const auto & layers    = model->layers;
-    const auto   n_layer   = model->hparams.n_layer;
-    const auto   n_embd    = model->hparams.n_embd;
-    const auto   n_ff      = model->hparams.n_ff(0);
-    const auto   type_size = ggml_type_size(layers[0].ffn_up->type);
-    is_gated_mlp           = !(layers[0].ffn_gate == nullptr);
-    layer_caches           = std::vector<sparkinfer_layer_cache *>(n_layer);
-    auto reorder_perms     = std::vector<ggml_tensor *>(n_layer);
+    const auto & layers  = model->layers;
+    const int    n_layer = model->hparams.n_layer;
+    const int    n_embd  = model->hparams.n_embd;
+    const int    n_ff    = model->hparams.n_ff(0);
 
-    const auto group_count = n_ff / group_size;
-    GGML_ASSERT(group_count <= 1024 && "we recommend a neuron group count of 1024 or less");
-    const int        cache_group_budget = vram_budget / (n_embd * type_size) / (is_gated_mlp ? 3 : 2) / group_size;
-    std::vector<int> cache_groups(n_layer);
-    int              used_groups = 0;
-    for (uint32_t il = 0; il < n_layer; ++il) {
-        int groups       = std::min(static_cast<uint32_t>(cache_group_budget * normalized_pattern[il]), group_count);
-        cache_groups[il] = groups;
-        used_groups += groups;
+    has_ffn_gate = layers[0].ffn_gate != nullptr;
+    layer_caches.resize(n_layer);
+    std::vector<ggml_tensor *> reorder_perms(n_layer);
+
+    const auto ft = layers[0].ffn_up->type;
+    GGML_ASSERT(ft == GGML_TYPE_F16 || ft == GGML_TYPE_BF16 || ft == GGML_TYPE_Q8_0 || ft == GGML_TYPE_Q4_0);
+    const auto n_group = n_ff / n_ffn_group;
+    GGML_ASSERT(n_group <= 1024 && "we recommend a neuron group count of 1024 or less");
+    const auto n_bytes_group        = ggml_row_size(ft, n_embd) * n_ffn_group;
+    const int  n_group_cache_budget = vram_budget / (n_bytes_group * (has_ffn_gate ? 3 : 2));
+
+    std::vector<int> n_group_cache(n_layer);
+    int              n_group_cache_used = 0;
+    for (int il = 0; il < n_layer; ++il) {
+        int n_group_init  = std::min(static_cast<int>(n_group_cache_budget * f_ffn_norm_pattern[il]), n_group);
+        n_group_cache[il] = n_group_init;
+        n_group_cache_used += n_group_init;
     }
-    for (int left_groups = cache_group_budget - used_groups; left_groups > 0;) {
-        int before_rr = left_groups;
-        for (uint32_t il = 0; il < n_layer && left_groups > 0; ++il) {
-            if (cache_groups[il] < static_cast<int>(group_count)) {
-                ++cache_groups[il];
-                --left_groups;
+    for (int n_group_cache_left = n_group_cache_budget - n_group_cache_used; n_group_cache_left > 0;) {
+        int before_rr = n_group_cache_left;
+        for (int il = 0; il < n_layer && n_group_cache_left > 0; ++il) {
+            if (n_group_cache[il] < static_cast<int>(n_group)) {
+                ++n_group_cache[il];
+                --n_group_cache_left;
             }
         }
-        if (left_groups == before_rr) {
+        if (n_group_cache_left == before_rr) {
             break;
         }
     }
-    std::vector<int> cache_sizes(n_layer);
-    for (uint32_t il = 0; il < n_layer; ++il) {
-        cache_sizes[il] = cache_groups[il] * group_size;
-    }
 
-    // for simulation, we select some layers to store all their neurons
-    // auto cs_idx = std::vector<int>(n_layer);
-    // std::iota(cs_idx.begin(), cs_idx.end(), 0);
-    // std::nth_element(cs_idx.begin(), cs_idx.begin() + k_spif_gpu_only, cs_idx.end(),
-    //                  [&](int i, int j) { return cache_sizes[i] > cache_sizes[j]; });
-    // std::for_each(cs_idx.begin(), cs_idx.begin() + k_spif_gpu_only, [&](int i) { cache_sizes[i] = n_ff; });
-
-    auto create_tensor = [&](ggml_context * ctx, ggml_type type, std::vector<int64_t> ne, uint32_t il,
-                             const char * name) {
+    auto create_tensor = [&](ggml_context * ctx, ggml_type type, std::vector<int64_t> ne, int il, const char * name) {
         char tensor_name[GGML_MAX_NAME];
-        std::snprintf(tensor_name, sizeof(tensor_name), "blk.%u.%s", il, name);
+        std::snprintf(tensor_name, sizeof(tensor_name), "blk.%d.%s", il, name);
         ggml_tensor * tensor_meta = ggml_new_tensor(ctx, type, static_cast<int>(ne.size()), ne.data());
         return ggml_set_name(tensor_meta, tensor_name);
     };
 
-    identity = create_tensor(ctx_gpu, GGML_TYPE_F32, { group_count, group_count }, 999, "identity");
+    group_identity = create_tensor(ctx_gpu, GGML_TYPE_F32, { n_group, n_group }, 999, "ffn_group_identity");
 
-    for (uint32_t il = 0; il < n_layer; ++il) {
+    for (int il = 0; il < n_layer; ++il) {
         layer_caches[il] = new sparkinfer_layer_cache();
 
         auto * lc    = layer_caches[il];
         lc->layer_cm = {
             /*.n  = */ static_cast<int>(n_ff),
-            /*.m  = */ static_cast<int>(cache_sizes[il]),
-            /*.g  = */ static_cast<int>(group_size),
-            /*.ng = */ static_cast<int>(n_ff / group_size),
-            /*.mg = */ static_cast<int>(cache_sizes[il] / group_size),
+            /*.m  = */ static_cast<int>(n_group_cache[il] * n_ffn_group),
+            /*.g  = */ static_cast<int>(n_ffn_group),
+            /*.ng = */ static_cast<int>(n_ff / n_ffn_group),
+            /*.mg = */ static_cast<int>(n_group_cache[il]),
         };
         lc->reload_plan = new copy_pair[lc->layer_cm.m]();
         lc->gpu_only    = (lc->layer_cm.m == lc->layer_cm.n);
@@ -220,7 +215,7 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const ch
 
         lc->ffn_up_cache =
             create_tensor(ctx_gpu, layers[il].ffn_up->type, { n_embd, lc->layer_cm.m }, il, "ffn_up.cache");
-        if (is_gated_mlp) {
+        if (has_ffn_gate) {
             lc->ffn_gate_cache =
                 create_tensor(ctx_gpu, layers[il].ffn_gate->type, { n_embd, lc->layer_cm.m }, il, "ffn_gate.cache");
         }
@@ -249,7 +244,6 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const ch
     if (backend_gpu && ggml_get_first_tensor(ctx_gpu)) {
         buf_gpu = ggml_backend_alloc_ctx_tensors(ctx_gpu, backend_gpu);
     }
-
     for (int i = 0; i < gguf_get_n_tensors(ctx_gguf); ++i) {
         const char *  name       = gguf_get_tensor_name(ctx_gguf, i);
         ggml_tensor * src_tensor = ggml_get_tensor(ctx_meta, name);
@@ -258,21 +252,21 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const ch
         const auto nbytes = ggml_nbytes(src_tensor);
         ggml_backend_tensor_set(dst_tensor, src_tensor->data, 0, nbytes);
     }
-
     gguf_free(ctx_gguf);
     ggml_free(ctx_meta);
 
-    std::vector<float> f32_mat_buf(group_count * group_count);
-    for (uint32_t i = 0; i < group_count; ++i) {
-        f32_mat_buf[i * group_count + i] = 1.0f;
+    std::vector<float> f32_mat_buf(n_group * n_group);
+    for (int i = 0; i < n_group; ++i) {
+        f32_mat_buf[i * n_group + i] = 1.0f;
     }
-    ggml_backend_tensor_set(identity, f32_mat_buf.data(), 0, ggml_nbytes(identity));
+    ggml_backend_tensor_set(group_identity, f32_mat_buf.data(), 0, ggml_nbytes(group_identity));
 
-    std::vector<uint8_t> src_max_buf(n_embd * n_ff * type_size);
-    std::vector<uint8_t> dst_max_buf(n_embd * n_ff * type_size);
-    uint8_t *            src_buf               = src_max_buf.data();
-    uint8_t *            dst_buf               = dst_max_buf.data();
-    const static bool    k_enable_spif_reorder = (getenv("SPIF_REORDER") != nullptr);
+    std::vector<uint8_t> buf_reorder_src(ggml_row_size(ft, n_embd) * n_ff);
+    std::vector<uint8_t> buf_reorder_dst(ggml_row_size(ft, n_embd) * n_ff);
+    auto *               src_buf = buf_reorder_src.data();
+    auto *               dst_buf = buf_reorder_dst.data();
+
+    const static bool k_enable_spif_reorder = (getenv("SPIF_REORDER") != nullptr);
 
     auto reorder_tensor_2d = [&](ggml_tensor * tensor, std::vector<int32_t> & perm) {
         const auto n_cols        = tensor->ne[0];
@@ -312,15 +306,15 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const ch
         }
     };
 
-    auto perm_vec       = std::vector<int32_t>(n_ff);
-    auto neuron_idx     = std::vector<int32_t>(n_ff);
-    auto group_maps     = std::vector<int32_t>(n_ff, -1);
-    auto neuron_mask    = std::vector<int32_t>(n_ff);
-    auto group_mask     = std::vector<float>(n_ff);
-    auto dfr_scores     = std::vector<float>(n_ff);
-    auto dfr_decay_data = std::vector<float>({ 0.67f, 1.0f - 0.67f, 1.0f });
+    std::vector<int32_t> perm_vec(n_ff);
+    std::vector<int32_t> neuron_idx(n_ff);
+    std::vector<int32_t> group_maps(n_ff);
+    std::vector<int32_t> neuron_mask(n_ff);
+    std::vector<float>   group_mask(n_ff);
+    std::vector<float>   dfr_scores(n_ff);
+    std::vector<float>   dfr_decay_data({ 0.67f, 1.0f - 0.67f, 1.0f });
 
-    for (uint32_t il = 0; il < n_layer; ++il) {
+    for (int il = 0; il < n_layer; ++il) {
         auto * lc           = layer_caches[il];
         auto * reorder_perm = reorder_perms[il];
 
@@ -329,15 +323,15 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const ch
         reorder_if_exists(lc->ffn_pred_down_b, perm_vec);
         reorder_if_exists(lc->ffn_up, perm_vec);
         reorder_if_exists(lc->ffn_up_b, perm_vec);
-        if (is_gated_mlp) {
+        if (has_ffn_gate) {
             reorder_if_exists(lc->ffn_gate, perm_vec);
             reorder_if_exists(lc->ffn_gate_b, perm_vec);
         }
         reorder_if_exists(lc->ffn_down, perm_vec);
 
-        const auto cache_nbytes = ggml_nbytes(lc->ffn_up_cache);
+        const size_t cache_nbytes = ggml_nbytes(lc->ffn_up_cache);
         ggml_backend_tensor_set(lc->ffn_up_cache, lc->ffn_up->data, 0, cache_nbytes);
-        if (is_gated_mlp) {
+        if (has_ffn_gate) {
             ggml_backend_tensor_set(lc->ffn_gate_cache, lc->ffn_gate->data, 0, cache_nbytes);
         }
         ggml_backend_tensor_set(lc->ffn_down_cache, lc->ffn_down->data, 0, cache_nbytes);
@@ -363,8 +357,8 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model, const ch
         ggml_backend_tensor_set(lc->dfr_scores, dfr_scores.data(), 0, ggml_nbytes(lc->dfr_scores));
         ggml_backend_tensor_set(lc->dfr_decay_pack, dfr_decay_data.data(), 0, ggml_nbytes(lc->dfr_decay_pack));
 
-        const auto cache_n_mega_bytes = (cache_nbytes * (is_gated_mlp ? 3 : 2)) / (1024.0 * 1024.0);
-        LLAMA_LOG_INFO("%s: [layer %2u] offloaded %6.2f MiB and cached %5d (%6.2f%%) neurons to GPU\n", __func__, il,
+        const double cache_n_mega_bytes = (cache_nbytes * (has_ffn_gate ? 3 : 2)) / (1024.0 * 1024.0);
+        LLAMA_LOG_INFO("%s: [layer %2d] offloaded %6.2f MiB and cached %5d (%6.2f%%) neurons to GPU\n", __func__, il,
                        cache_n_mega_bytes, lc->layer_cm.m, lc->layer_cm.m * 100.0 / lc->layer_cm.n);
     }
     LLAMA_LOG_INFO("%s: the cache manger has totally %.2f MiB GPU memory footprint\n", __func__,

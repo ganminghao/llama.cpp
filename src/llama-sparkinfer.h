@@ -16,9 +16,9 @@ struct sparkinfer_cache_manager {
     ggml_backend_buffer_t buf_cpu     = nullptr;
     ggml_backend_buffer_t buf_gpu     = nullptr;
 
-    bool          is_gated_mlp = false;
-    ggml_tensor * identity     = nullptr;
+    bool          has_ffn_gate   = false;
+    ggml_tensor * group_identity = nullptr;
 
-    sparkinfer_cache_manager(llama_model * model, const char * spif_ms_path, size_t vram_budget);
+    sparkinfer_cache_manager(llama_model * model, const char * spif_ms_path, int64_t vram_budget);
     ~sparkinfer_cache_manager();
 };
