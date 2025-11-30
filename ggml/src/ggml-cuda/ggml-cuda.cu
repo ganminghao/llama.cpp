@@ -2468,6 +2468,7 @@ static void ggml_cuda_mul_mat_sparse(ggml_backend_cuda_context & ctx,
             break;
         case GGML_TYPE_Q8_0:
             ggml_cuda_mul_mat_sparse_q(ctx, src0, src1, dst);
+            break;
         default:
             GGML_ASSERT(false && "unsupported type for sparse matrix multiplication");
     }
@@ -2484,7 +2485,7 @@ static void ggml_cuda_axpy_sparse(ggml_backend_cuda_context & ctx,
             ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_axpy_sparse, nullptr);
             break;
         case GGML_TYPE_Q8_0:
-            ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_axpy_sparse_q, quantize_row_q8_1_cuda);
+            ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_axpy_sparse_q, nullptr);
             break;
         default:
             GGML_ASSERT(false && "unsupported type for sparse matrix multiplication");

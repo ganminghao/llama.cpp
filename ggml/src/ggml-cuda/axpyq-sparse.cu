@@ -1,209 +1,131 @@
-#include "common.cuh"
-#include "quantize.cuh"
-#include "ggml.h"
 #include "axpyq-sparse.cuh"
+#include "common.cuh"
+#include "ggml.h"
+#include <stdint.h>
 
-#ifdef GGML_CUDA_F16
-typedef half dfloat; // dequantize float
-typedef half2 dfloat2;
-#else
-typedef float dfloat; // dequantize float
-typedef float2 dfloat2;
-#endif //GGML_CUDA_F16
+#define Q8_BLOCK_SIZE 34
+#define Q8_NUM_B 32
+#define TILE_TOKENS 4  // we process 4 tokens per block
+#define TILE_COLS   4  // we divide ncols into 8 tiles
 
-// #define QK8_0 32
-// #define QR8_0 1
-// #define QI8_0 (QK8_0 / (4 * QR8_0))
-// typedef struct {
-//     half    d;              // delta
-//     int8_t  qs[QK8_0];      // quants
-// } block_q8_0;
-// static_assert(sizeof(block_q8_0) == sizeof(ggml_fp16_t) + QK8_0, "wrong q8_0 block size/padding");
-#define AXPY_BLOCK_X 512
-#define AXPY_BLOCK_Y 1
-#define AXPY_BLOCK_Z 256
-#define GGML_CUDA_DMMV_X 32
-#define GGML_CUDA_MMV_Y 1
-
-
-static __device__ __forceinline__ void dequantize_q8_0(const void * vx, const int ib, const int iqs, dfloat2 & v){
-    const block_q8_0 * x = (const block_q8_0 *) vx;
-
-    const dfloat d = x[ib].d;
-
-    v.x = x[ib].qs[iqs + 0];
-    v.y = x[ib].qs[iqs + 1];
-
-#ifdef GGML_CUDA_F16
-    v = __hmul2(v, {d, d});
-#else
-    v.x *= d;
-    v.y *= d;
-#endif // GGML_CUDA_F16
+static __device__ inline float fp16_to_fp32_device(uint16_t h) {
+    union {
+        uint16_t u;
+        __half   h;
+    } tmp;
+    tmp.u = h;
+    return __half2float(tmp.h);
 }
 
-template <int qk, int qr> 
-static __global__ void dequantize_mul_mat_axpy_sparse_pro(const void * __restrict__ vx, const dfloat * __restrict__ y, float * __restrict__ dst, const int ncols, const int nrows, const int num_gpu_neurons, const int32_t *lst, const float *idx) {
-    const int thread_col = blockIdx.y * blockDim.x + threadIdx.x;
-    const int col = 2 * thread_col;
-    const int tid = threadIdx.x;
-    const int wid = threadIdx.y;
-    const int iqs = (col%qk) / qr; // x quant index
-    const int row_offset = blockIdx.z * AXPY_BLOCK_Z;
+static __global__ void mul_mat_axpy_sparse_rowwise_q(const void * __restrict__ vx,
+                                                     const float * __restrict__ y,
+                                                     float * __restrict__ dst,
+                                                     const int       ncols,
+                                                     const int       nrows,
+                                                     const int       qblock_num,
+                                                     const int       block_len,
+                                                     const int       src_ncols,
+                                                     const int32_t * gpu_neu_idx,
+                                                     const float *   sparse_idx) {
+    const int blk_idx      = blockIdx.x;   // block index, range from [0,num_gpu_neurons)
+    const int token_ty     = threadIdx.y;  // [0, TILE_TOKENS)
+    const int thds_per_blk = blockDim.x;   // number of threads per block (WARP_SIZE)
+    const int tid          = threadIdx.x;  // range from [0,31]
 
-    if (col >= ncols) {
+    const int token_idx = blockIdx.y * blockDim.y + token_ty;
+    if (token_idx >= src_ncols) {
         return;
     }
 
-    __shared__ dfloat dst_tmp[AXPY_BLOCK_Y][AXPY_BLOCK_X*2];
-    __shared__ dfloat y_tmp[AXPY_BLOCK_Z]; 
+    const float * y_tok      = y + token_idx * nrows;
+    float *       dst_tok    = dst + token_idx * ncols;
+    const float * sparse_tok = sparse_idx + token_idx * nrows;
 
-    dst_tmp[wid][tid] = 0.0;
-    dst_tmp[wid][tid+AXPY_BLOCK_X] = 0.0;
-    
-    if (wid == 0) {
-        if (lst) {
-            for(int i=tid; i<AXPY_BLOCK_Z; i += AXPY_BLOCK_X) {
-                y_tmp[i] = y[lst[i+row_offset]];
-            }
-        } else {
-            for(int i=tid; i<AXPY_BLOCK_Z; i += AXPY_BLOCK_X) {
-                // ((dfloat4*)y_tmp)[i] = *(dfloat4*)(&y[i*4+row_offset]);
-                y_tmp[i] = y[i+row_offset];
-            }
-        }
+    const int neu = gpu_neu_idx ? gpu_neu_idx[blk_idx] : blk_idx;
+
+    const float alpha_fp32 = y_tok[neu];
+
+    const int tile_id      = blockIdx.z;
+    const int block_start  = tile_id * block_len;                               // block index start in this tile
+    const int block_end    = min(block_start + block_len, qblock_num);          // block index end (exclusive)
+    const int tile_blocks  = max(block_end - block_start, 0);
+    const int col_start    = block_start * Q8_NUM_B;                            // column start for this tile
+    const int col_end      = min(col_start + tile_blocks * Q8_NUM_B, ncols);    // column end for this tile
+    const int col_len      = max(col_end - col_start, 0);                       // number of valid columns in this tile
+
+    if (col_len <= 0) {
+        return;
+    }
+
+    extern __shared__ float shmem[];
+    const int tile_cols = block_len * Q8_NUM_B;
+
+    // init shmem
+    for (int i = tid; i < col_len; i += thds_per_blk) {
+        shmem[token_ty * tile_cols + i] = 0.0f;
     }
     __syncthreads();
 
-#pragma unroll 8
-    for(int gpu_row = wid; gpu_row < num_gpu_neurons; gpu_row += AXPY_BLOCK_Y) {        
-        if(y_tmp[gpu_row] == 0.0) continue;
-
-        const int ib = ((gpu_row + row_offset)*ncols + col) / qk; // x block index
-        
-        dfloat2 v;
-        dequantize_q8_0(vx, ib, iqs, v);
-
-        dst_tmp[wid][tid] += v.x * y_tmp[gpu_row];
-        dst_tmp[wid][tid+AXPY_BLOCK_X] += v.y * y_tmp[gpu_row];
-    }
-
-    for (int offset = AXPY_BLOCK_Y / 2; offset > 0; offset >>= 1) {
-        if (wid < offset) {
-            dst_tmp[wid][tid] += dst_tmp[wid+offset][tid];
-            dst_tmp[wid][tid+AXPY_BLOCK_X] += dst_tmp[wid][tid+AXPY_BLOCK_X];
-        }
-        __syncthreads();
-    }
-
-    if (wid == 0) {
-        const int iybs = col - col%qk; // y block start index
-        const int y_offset = qr == 1 ? 1 : qk/2;
-        atomicAdd(&dst[iybs + iqs], dst_tmp[wid][tid]);
-        atomicAdd(&dst[iybs + iqs + y_offset], dst_tmp[wid][tid+AXPY_BLOCK_X]); 
-    }
-}
-
-
-template <int qk, int qr>
-static __global__ void dequantize_mul_mat_axpy_sparse_batch(const void * __restrict__ vx, const dfloat * __restrict__ y, float * __restrict__ dst, const int ncols, const int nrows, const int num_gpu_neurons, int src1_ne0, int src1_ncols, const int32_t *lst, float *idx) {
-    // qk = quantized weights per x block
-    // qr = number of quantized weights per data value in x block
-    const int gpu_row = blockIdx.y*blockDim.y + threadIdx.y;
-
-    if (gpu_row >= num_gpu_neurons) {
+    if (sparse_tok[neu] < 0.5f || alpha_fp32 == 0.0f) {
         return;
     }
-    int row = lst ? lst[gpu_row] : gpu_row;
-    const int bid = blockIdx.y;
 
-    extern __shared__ float shared_dst[]; // TODO:dynamic
+    const char * wdata = reinterpret_cast<const char *>(vx);
 
-    const int tid = threadIdx.x;
+    const int row_block_offset = blk_idx * qblock_num;
 
-    const int iter_stride = 2*GGML_CUDA_DMMV_X;
-    const int vals_per_iter = iter_stride / WARP_SIZE; // num quantized vals per thread and i iter
-    const int y_offset = qr == 1 ? 1 : qk/2;
-    float * loop_idx = idx;
-    dfloat * loop_y = (dfloat *)y;
-    float * loop_dst = dst;
+    for (int col = col_start + tid; col < col_end; col += thds_per_blk) {
+        const int local_col = col - col_start;
 
-// partial sum for each thread
-    float tmp = 0.0f;
-    for (int i = 0; i < ncols; i += GGML_CUDA_DMMV_X) {
-        shared_dst[i+tid] = 0;
+        const int block_idx_col = col / Q8_NUM_B;
+        const int idx_in_block  = col - block_idx_col * Q8_NUM_B;
+
+        const int flat_block_idx = row_block_offset + block_idx_col;
+        const int byte_offset    = flat_block_idx * Q8_BLOCK_SIZE;
+
+        const uint16_t * d_ptr = reinterpret_cast<const uint16_t *>(wdata + byte_offset);
+        const uint16_t   d_h   = *d_ptr;
+        const float      d     = fp16_to_fp32_device(d_h);
+
+        const int8_t * qs = reinterpret_cast<const int8_t *>(wdata + byte_offset + sizeof(uint16_t));
+        const float    w  = d * static_cast<float>(qs[idx_in_block]);
+
+        shmem[token_ty * tile_cols + local_col] += w * alpha_fp32;
     }
-    // __syncthreads();
-    for (int col_id = 0; col_id < src1_ncols; col_id++) {
-        __syncthreads();
-        if (loop_idx[row] < 0.5f) {
-            loop_dst += ncols;
-            loop_idx += src1_ne0;
-            loop_y += src1_ne0;
-            continue;
-        }
-        
 
-        for (int i = 0; i < ncols; i += iter_stride)
-        {
-            const int col = i + vals_per_iter * tid;
-            const int ib = (gpu_row * ncols + col) / qk; // x block index
-            const int iqs = (col % qk) / qr;         // x quant index
-            const int iybs = col - col % qk;         // y block start index
-
-// processing >2 values per i iter is faster for fast GPUs
-#pragma unroll
-            for (int j = 0; j < vals_per_iter; j += 2)
-            {
-                // process 2 vals per j iter
-
-                // dequantize
-                // for qr = 2 the iqs needs to increase by 1 per j iter because 2 weights per data val
-                dfloat2 v;
-                dequantize_q8_0(vx, ib, iqs + j / qr, v);
-
-                // matrix multiplication
-                // for qr = 2 the y index needs to increase by 1 per j iter because of y_offset = qk/2
-                tmp = v.x * loop_y[row];
-                shared_dst[iybs + iqs + j / qr + 0] = tmp;
-                tmp = v.y * loop_y[row];
-                shared_dst[iybs + iqs + j / qr + y_offset] = tmp;
-            }
-        }
-        /* __syncthreads(); */
-
-        for (int i = 0; i < ncols; i += GGML_CUDA_DMMV_X)
-        {
-            atomicAdd(&loop_dst[i + tid], shared_dst[i + tid]);
-            shared_dst[i+tid] = 0;
-        }
-        loop_dst += ncols;
-        loop_idx += src1_ne0;
-        loop_y += src1_ne0;
+    for (int i = tid; i < col_len; i += thds_per_blk) {
+        atomicAdd(&dst_tok[col_start + i], shmem[token_ty * tile_cols + i]);
     }
 }
 
-static void dequantize_axpy_sparse_vec_q8_0_cuda(const void * vx, const dfloat * y, float * dst, const int ncols, const int nrows, const int num_gpu_neurons, cudaStream_t stream, const int32_t *lst, float *idx)  {
-    GGML_ASSERT(ncols % GGML_CUDA_DMMV_X == 0);
-    const int block_num_y = (ncols + AXPY_BLOCK_X*2 - 1) / AXPY_BLOCK_X / 2;
-    const int block_num_z = nrows / AXPY_BLOCK_Z;  
-    const dim3 block_nums(1, block_num_y, block_num_z);
-    const dim3 block_dims(AXPY_BLOCK_X, AXPY_BLOCK_Y, 1);
-    // dequantize_mul_mat_axpy<QK4_0, QR4_0, dequantize_q4_0>
-    //     <<<block_nums, block_dims, ncols*sizeof(float), stream>>>(vx, y, dst, ncols, nrows);
-    // printf("launch kernel: (%d, %d)\n", block_num_x, block_num_y);
-    dequantize_mul_mat_axpy_sparse_pro<QK8_0, 1>
-        <<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols, num_gpu_neurons, AXPY_BLOCK_Z, lst, idx);
+static void launch_mul_mat_axpy_cuda_sparse_rowwise(const char  *   x,
+                                                    const float *   y,
+                                                    const float *   sparse_idx,
+                                                    const int32_t * gpu_neu_idx,
+                                                    float *         dst,
+                                                    const int64_t   ncols,
+                                                    const int64_t   nrows,
+                                                    const int64_t   src_ncols,
+                                                    const int64_t   num_gpu_neurons,
+                                                    cudaStream_t    stream) {
+    dim3      block_nums;
+    dim3      block_dims;
+    size_t    share_mem_size = 0;
+    const int qblock_num = ncols / Q8_NUM_B + (ncols % Q8_NUM_B != 0 ? 1 : 0);  // number of blocks per neurons
+    const int block_len  = (qblock_num + TILE_COLS - 1) / TILE_COLS;            // number of blocks per tile
+    if (src_ncols == 1) {
+        block_nums     = dim3(num_gpu_neurons, 1, TILE_COLS);
+        block_dims     = dim3(WARP_SIZE, 1, 1);
+        share_mem_size = block_len * Q8_NUM_B * sizeof(float);
+    } else {
+        block_nums     = dim3(num_gpu_neurons, (src_ncols + TILE_TOKENS - 1) / TILE_TOKENS, TILE_COLS);
+        block_dims     = dim3(WARP_SIZE, TILE_TOKENS, 1);
+        share_mem_size = block_len * Q8_NUM_B * TILE_TOKENS * sizeof(float);
+    }
+    mul_mat_axpy_sparse_rowwise_q<<<block_nums, block_dims, share_mem_size, stream>>>(
+        x, y, dst, ncols, nrows, qblock_num, block_len, src_ncols, gpu_neu_idx, sparse_idx);
 }
 
-static void dequantize_axpy_sparse_batch_q8_0_cuda(const void * vx, const dfloat * y, float * dst, const int ncols, const int nrows, const int num_gpu_neurons, int src1_rows, int src1_ncols, cudaStream_t stream, const int32_t *lst, float *idx) {
-    GGML_ASSERT(ncols % GGML_CUDA_DMMV_X == 0);
-    const int block_num_y = (nrows + GGML_CUDA_MMV_Y - 1) / GGML_CUDA_MMV_Y;
-    const dim3 block_nums(1, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, GGML_CUDA_MMV_Y, 1);
-    dequantize_mul_mat_axpy_sparse_batch<QK8_0, 1>
-        <<<block_nums, block_dims, ncols*sizeof(float), stream>>>(vx, y, dst, ncols, nrows, num_gpu_neurons, src1_rows, src1_ncols, lst, idx);
-}
 
 void ggml_cuda_op_axpy_sparse_q(ggml_backend_cuda_context & ctx,
                               const ggml_tensor *         src0,
@@ -217,57 +139,42 @@ void ggml_cuda_op_axpy_sparse_q(ggml_backend_cuda_context & ctx,
                               const int64_t               row_high,
                               const int64_t               src1_ncols,
                               const int64_t               src1_padded_row_size,
-                              cudaStream_t                stream){
-    const int64_t ne11 = src1->ne[1]; // input batch size
-    const int64_t ne10 = src1->ne[0]; // input feature size
-    const int64_t row_diff = row_high - row_low;
+                              cudaStream_t                stream) {
+    GGML_ASSERT(src1->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_UNUSED(row_low);
+    GGML_UNUSED(row_high);
 
-    // on some GPUs it is faster to convert src1 to half and to use half precision intrinsics
-#ifdef GGML_CUDA_F16
-    size_t ash;
-    dfloat * src1_dfloat = nullptr; // dfloat == half
+    GGML_ASSERT(dst->src[2]->data != nullptr && "missing sparse_idx");
 
-    bool src1_convert_f16 = src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q4_1 ||
-        src0->type == GGML_TYPE_Q5_0 || src0->type == GGML_TYPE_Q5_1 ||
-        src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_F16;
-
-    if (src1_convert_f16) {
-        src1_dfloat = (half *) ggml_cuda_pool_malloc(ne00*sizeof(half), &ash);
-        ggml_cpy_f32_f16_cuda((const char *) src1_ddf_i, (char *) src1_dfloat, ne00,
-                                ne00, 1, sizeof(float), 0, 0,
-                                ne00, 1, sizeof(half),  0, 0, stream);
-    }
-#else
-    const dfloat * src1_dfloat = (const dfloat *) src1_ddf_i; // dfloat == float, no conversion
-#endif // GGML_CUDA_F16
     const int64_t ncols = src0->ne[0];  // feature dimension
     const int64_t nrows = src1->ne[0];  // total number of neurons
 
     float *   sparse_idx      = static_cast<float *>(dst->src[2]->data);
-    const int32_t * gpu_neu_idx     = dst->src[3] != NULL ? static_cast<int32_t *>(dst->src[3]->data) : NULL;
-    const int64_t   num_gpu_neurons = dst->src[3] ? dst->src[3]->ne[0] : nrows;
+    int32_t * gpu_neu_idx     = dst->src[3] != NULL ? static_cast<int32_t *>(dst->src[3]->data) : NULL;
+    int64_t   num_gpu_neurons = dst->src[3] ? dst->src[3]->ne[0] : nrows;
+
+    const int            cc   = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    const enum ggml_prec prec = fast_fp16_available(cc) ? ggml_prec(dst->op_params[0]) : GGML_PREC_F32;
+
+    // set dst_dd_i as zero
+    CUDA_CHECK(cudaMemsetAsync(dst_dd_i, 0, sizeof(float) * dst->ne[0] * dst->ne[1], stream));
 
     switch (src0->type) {
         case GGML_TYPE_Q8_0:
-            if (ne11 == 1) {
-                dequantize_axpy_sparse_vec_q8_0_cuda(src0_dd_i, src1_dfloat, dst_dd_i, ncols, nrows, num_gpu_neurons, stream, gpu_neu_idx, sparse_idx);
-            } else {
-                dequantize_axpy_sparse_batch_q8_0_cuda(src0_dd_i, src1_dfloat, dst_dd_i, ncols, nrows, num_gpu_neurons, ne10, src1_ncols, stream, gpu_neu_idx, sparse_idx);
+            {
+                launch_mul_mat_axpy_cuda_sparse_rowwise(src0_dd_i, src1_ddf_i, sparse_idx, gpu_neu_idx, dst_dd_i, ncols, nrows, dst->ne[1],
+                                                                  num_gpu_neurons, stream);
             }
             break;
         default:
-            GGML_ABORT("unsupported src0 type %s for ggml_cuda_op_axpy_sparse_q", ggml_type_name(src0->type));
+            GGML_ABORT("unsupported type: %s", ggml_type_name(src0->type));
     }
 
-#ifdef GGML_CUDA_F16
-    if (src1_convert_f16) {
-        ggml_cuda_pool_free(src1_dfloat, ash);
-    }
-#endif // GGML_CUDA_F16
-
-    (void) src1;
-    (void) dst;
-    (void) src1_ddq_i;
-    (void) src1_ncols;
-    (void) src1_padded_row_size;
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(src1);
+    GGML_UNUSED(dst);
+    GGML_UNUSED(src1_ddq_i);
+    GGML_UNUSED(src1_ncols);
+    GGML_UNUSED(src1_padded_row_size);
 }

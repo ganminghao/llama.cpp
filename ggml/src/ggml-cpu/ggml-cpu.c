@@ -2079,36 +2079,52 @@ static void ggml_axpy_avx_q8_0_alphaf32(const int                         n,
     float * GGML_RESTRICT            result = (float *) vz;
     int i = 0;
 
-#if defined(__AVX2__)
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    // AVX-512 implementation (requires AVX512F + AVX512BW)
     for (; i < n_blocks; ++i) {
-        // 1. 计算当前块的有效缩放因子: (block_scale * alpha)
+        float d_val = ggml_fp16_to_fp32(x[i].d);
+        __m512 v_scale = _mm512_set1_ps(d_val * alpha);
+
+        // load 16 signed bytes (low 16) and next 16 (high 16)
+        __m128i v_q_lo128 = _mm_loadu_si128((const __m128i *)(x[i].qs));        // bytes 0..15
+        __m128i v_q_hi128 = _mm_loadu_si128((const __m128i *)(x[i].qs + 16));   // bytes 16..31
+
+        // sign-extend 8-bit -> 32-bit for 16 lanes each
+        __m512i v_i32_lo = _mm512_cvtepi8_epi32(v_q_lo128); // expands 16 int8 -> 16 int32
+        __m512i v_i32_hi = _mm512_cvtepi8_epi32(v_q_hi128); // expands next 16
+
+        // convert to float
+        __m512 v_x0 = _mm512_cvtepi32_ps(v_i32_lo);
+        __m512 v_x1 = _mm512_cvtepi32_ps(v_i32_hi);
+
+        float * res_ptr = result + i * 32;
+
+        // load destination floats (16 lanes each)
+        __m512 v_y0 = _mm512_loadu_ps(res_ptr + 0);
+        __m512 v_y1 = _mm512_loadu_ps(res_ptr + 16);
+
+        // fused multiply-add: y += x * (d_val * alpha)
+        v_y0 = _mm512_fmadd_ps(v_x0, v_scale, v_y0);
+        v_y1 = _mm512_fmadd_ps(v_x1, v_scale, v_y1);
+
+        // store back
+        _mm512_storeu_ps(res_ptr + 0,  v_y0);
+        _mm512_storeu_ps(res_ptr + 16, v_y1);
+    }
+
+#elif defined(__AVX2__)
+    for (; i < n_blocks; ++i) {
         float d_val = ggml_fp16_to_fp32(x[i].d);
         __m256 v_scale = _mm256_set1_ps(d_val * alpha);
-
-        // 2. 加载 32 个 int8 量化值
         __m256i v_qs = _mm256_loadu_si256((const __m256i *) x[i].qs);
-
-        // 3. 将 int8 转换为 int16 (低128位和高128位分别扩展)
-        // low 16 bytes -> 16 x int16
         __m256i v_qs_lo_16 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(v_qs));
-        // high 16 bytes -> 16 x int16
         __m256i v_qs_hi_16 = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(v_qs, 1));
 
-        // 4. 将 int16 转换为 float 并计算 (需要 4 个 __m256 寄存器来存 32 个 float)
-        
-        // --- 处理前 16 个元素 (v_qs_lo_16) ---
-        // 0-7
         __m256 v_x0 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_castsi256_si128(v_qs_lo_16)));
-        // 8-15
         __m256 v_x1 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_extracti128_si256(v_qs_lo_16, 1)));
-
-        // --- 处理后 16 个元素 (v_qs_hi_16) ---
-        // 16-23
         __m256 v_x2 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_castsi256_si128(v_qs_hi_16)));
-        // 24-31
         __m256 v_x3 = _mm256_cvtepi32_ps(_mm256_cvtepi16_epi32(_mm256_extracti128_si256(v_qs_hi_16, 1)));
 
-        // 5. 加载 dst (Y)，执行 FMA，并写回
         float * res_ptr = result + i * 32;
 
         __m256 v_y0 = _mm256_loadu_ps(res_ptr + 0);
@@ -2134,6 +2150,13 @@ static void ggml_axpy_avx_q8_0_alphaf32(const int                         n,
         }
     }
 #endif
+    for (int rem = n_blocks * 32; rem < n; ++rem) {
+
+        const int b = rem / 32;
+        const int off = rem % 32;
+        float d_val = ggml_fp16_to_fp32(x[b].d);
+        result[rem] += x[b].qs[off] * d_val * alpha;
+    }
 }
 
 
@@ -2240,17 +2263,31 @@ static void ggml_compute_forward_axpy_sparse_colwise(const struct ggml_compute_p
     incr_ptr_aligned(&wdata_cur, sizeof(int32_t) * ggml_nelements(idx), sizeof(int64_t));
     GGML_ASSERT(params->wsize >= (size_t) ((char *) wdata_cur - (char *) params->wdata));
 
-    // convert to same type, align precision, src1 fp32->fp16/bf16
+    // convert to same type, align precision
     if (src1->type != vec_dot_type) {
         char * wdata = params->wdata;
-        GGML_ASSERT(ne12 == 1 && ne13 == 1);  // only support 2D input now
 
-        int64_t ne    = ggml_nelements(src1);
-        int64_t bs    = (ne + nth - 1) / nth;
-        int64_t start = bs * ith;
-        int64_t end   = bs * (ith + 1) > ne ? ne : bs * (ith + 1);
-        from_float((float *) ((char *) src1->data + start * nb10),
-                   (void *) (wdata + start * ggml_type_size(vec_dot_type)), end - start);
+        const size_t nbw0 = ggml_type_size(vec_dot_type);
+        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
+        const size_t nbw2 = nbw1 * ne11;
+        const size_t nbw3 = nbw2 * ne12;
+
+        assert(params->wsize >= ne13 * nbw3);
+        GGML_ASSERT(src1->type == GGML_TYPE_F32);
+
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = 0; i12 < ne12; ++i12) {
+                for (int64_t i11 = 0; i11 < ne11; ++i11) {
+                    size_t  bs               = ggml_blck_size(vec_dot_type);
+                    int64_t ne10_block_start = (ith * ne10 / bs) / nth;
+                    int64_t ne10_block_end   = ((ith + 1) * ne10 / bs) / nth;
+                    from_float((float *) ((char *) src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11 +
+                                          ne10_block_start * bs * nb10),
+                               (void *) (wdata + i13 * nbw3 + i12 * nbw2 + i11 * nbw1 + ne10_block_start * nbw0),
+                               (ne10_block_end - ne10_block_start) * bs);
+                }
+            }
+        }
     }
     ggml_barrier(params->threadpool);
 
@@ -2481,14 +2518,14 @@ static void ggml_compute_forward_axpy_sparse_rowwise(const struct ggml_compute_p
     const int64_t n_tokens   = ne1;
     const int64_t weight_nb1 = nb01;
     const int64_t idx_nb1    = idx->nb[1];
-    const int64_t input_nb1  = (src1->type == vec_type) ? nb11 : ggml_type_size(vec_type) * ne10;
+    const int64_t input_nb1  = (src1->type == vec_type || src0->type == GGML_TYPE_Q8_0) ? nb11 : ggml_type_size(vec_type) * ne10;
 
-    void * input = (src1->type == vec_type) ? src1->data : params->wdata;
+    void * input = (src1->type != vec_type && src0->type != GGML_TYPE_Q8_0) ? params->wdata : src1->data;
 
     float buf[ne00];
     memset(buf, 0, ne00 * sizeof(float));
 
-    int     K                = 8;
+    int     K                = (src0->type == GGML_TYPE_Q8_0) ? 64 : 8;
     int64_t chunks_per_token = nth * K;
     int64_t neu_per_thd      = (ne01 + chunks_per_token - 1) / chunks_per_token;
 
