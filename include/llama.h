@@ -310,6 +310,7 @@ extern "C" {
 
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights
+        bool use_sparkinfer;  // a flag used in llama_context graph reserve
         bool use_mmap;        // use mmap if possible
         bool use_direct_io;   // use direct io, takes precedence over use_mmap when supported
         bool use_mlock;       // force system to keep model in RAM
@@ -489,6 +490,11 @@ extern "C" {
                      struct llama_model * model,
             struct llama_context_params   params),
             "use llama_init_from_model instead");
+
+    LLAMA_API void sparkinfer_init_from_model_and_ctx(
+               struct llama_model * tgt_model, struct llama_context * tgt_ctx,
+               struct llama_model * dft_model, struct llama_context * dft_ctx,
+                    const char * spif_ms_path, int64_t vram_budget);
 
     // Frees all allocated memory
     LLAMA_API void llama_free(struct llama_context * ctx);

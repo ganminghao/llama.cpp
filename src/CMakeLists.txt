@@ -32,6 +32,7 @@ add_library(llama
             llama-model.cpp
             llama-quant.cpp
             llama-sampler.cpp
+            llama-sparkinfer.cpp
             llama-vocab.cpp
             unicode-data.cpp
             unicode.cpp
@@ -76,6 +77,7 @@ add_library(llama
             models/glm4-moe.cpp
             models/glm4.cpp
             models/gpt2.cpp
+            models/opt.cpp
             models/gptneox.cpp
             models/granite-hybrid.cpp
             models/granite.cpp

@@ -1313,7 +1313,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.kv_unified = value;
         }
-    ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
+    ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_SPECULATIVE}));
     add_opt(common_arg(
         {"--context-shift"},
         {"--no-context-shift"},
@@ -2280,6 +2280,28 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             parse_tensor_buffer_overrides(value, params.speculative.tensor_buft_overrides);
         }
     ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"-spif-ms", "--sparkinfer-model-split"}, "FNAME",
+        "path to the model split file used by Sparkinfer",
+        [](common_params & params, const std::string & value) {
+            params.spif_ms_path = value;
+        }
+    ).set_env("LLAMA_ARG_SP_MODEL_SPLIT"));
+    add_opt(common_arg(
+        {"-vb", "--vram-budget"}, "N",
+        "sets a memory budget (in GiB) on GPU for tensors; if set to 0, no explicit limit is applied",
+        [](common_params & params, int value) {
+            if (value < 0) { throw std::invalid_argument("invalid value"); }
+            params.vram_budget = value;
+        }
+    ).set_env("LLAMA_ARG_VRAM_BUDGET"));
+    add_opt(common_arg(
+        {"-cffn", "--cpu-ffn"},
+        "keep all Feed Forward Network (FFN) weights in the CPU",
+        [](common_params & params) {
+            params.tensor_buft_overrides.push_back(llm_ffn_cpu_override());
+        }
+    ).set_env("LLAMA_ARG_CPU_FFN"));
     add_opt(common_arg(
         {"-cmoe", "--cpu-moe"},
         "keep all Mixture of Experts (MoE) weights in the CPU",

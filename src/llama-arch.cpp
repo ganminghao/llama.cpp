@@ -9,12 +9,16 @@
 static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_CLIP,             "clip"             }, // dummy, only used by llama-quantize
     { LLM_ARCH_LLAMA,            "llama"            },
+    { LLM_ARCH_PROSPARSE_LLAMA,  "prosparse-llama"  },
+    { LLM_ARCH_BAMBOO,           "bamboo"           },
     { LLM_ARCH_LLAMA4,           "llama4"           },
     { LLM_ARCH_DECI,             "deci"             },
     { LLM_ARCH_FALCON,           "falcon"           },
+    { LLM_ARCH_RELUFALCON,       "relu-falcon"      },
     { LLM_ARCH_GROK,             "grok"             },
     { LLM_ARCH_GPT2,             "gpt2"             },
     { LLM_ARCH_GPTJ,             "gptj"             },
+    { LLM_ARCH_OPT,              "opt"              },
     { LLM_ARCH_GPTNEOX,          "gptneox"          },
     { LLM_ARCH_MPT,              "mpt"              },
     { LLM_ARCH_BAICHUAN,         "baichuan"         },
@@ -32,6 +36,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_STABLELM,         "stablelm"         },
     { LLM_ARCH_QWEN,             "qwen"             },
     { LLM_ARCH_QWEN2,            "qwen2"            },
+    { LLM_ARCH_SPARSEQWEN2,      "sparse-qwen2"     },
     { LLM_ARCH_QWEN2MOE,         "qwen2moe"         },
     { LLM_ARCH_QWEN2VL,          "qwen2vl"          },
     { LLM_ARCH_QWEN3,            "qwen3"            },
@@ -328,6 +333,8 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_XIELU_BETA,            "xielu.beta"            },
     { LLM_KV_XIELU_EPS,             "xielu.eps"             },
 
+    { LLM_KV_PREDICTOR_LOW_RANKS,   "predictor.low_ranks"   },
+
     // deprecated
     { LLM_KV_TOKENIZER_PREFIX_ID, "tokenizer.ggml.prefix_token_id" },
     { LLM_KV_TOKENIZER_SUFFIX_ID, "tokenizer.ggml.suffix_token_id" },
@@ -348,8 +355,11 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
     { LLM_TENSOR_ATTN_ROT_EMBD,                          "blk.%d.attn_rot_embd" },
     { LLM_TENSOR_FFN_GATE_INP,                           "blk.%d.ffn_gate_inp" },
     { LLM_TENSOR_FFN_NORM,                               "blk.%d.ffn_norm" },
+    { LLM_TENSOR_FFN_PRED_UP,                            "blk.%d.ffn_pred_up" },
+    { LLM_TENSOR_FFN_PRED_DOWN,                          "blk.%d.ffn_pred_down" },
     { LLM_TENSOR_FFN_GATE,                               "blk.%d.ffn_gate" },
     { LLM_TENSOR_FFN_DOWN,                               "blk.%d.ffn_down" },
+    { LLM_TENSOR_FFN_DOWN_T,                             "blk.%d.ffn_down_t" },
     { LLM_TENSOR_FFN_UP,                                 "blk.%d.ffn_up" },
     { LLM_TENSOR_FFN_GATE_EXP,                           "blk.%d.ffn_gate.%d" },
     { LLM_TENSOR_FFN_DOWN_EXP,                           "blk.%d.ffn_down.%d" },
@@ -570,6 +580,34 @@ static std::set<llm_tensor> llm_get_tensor_names(llm_arch arch) {
                 LLM_TENSOR_FFN_DOWN_EXPS,
                 LLM_TENSOR_FFN_UP_EXPS,
             };
+        case LLM_ARCH_PROSPARSE_LLAMA:
+        case LLM_ARCH_BAMBOO:
+            return {
+                LLM_TENSOR_TOKEN_EMBD,
+                LLM_TENSOR_OUTPUT_NORM,
+                LLM_TENSOR_OUTPUT,
+                LLM_TENSOR_ROPE_FREQS,
+                LLM_TENSOR_ATTN_NORM,
+                LLM_TENSOR_ATTN_Q,
+                LLM_TENSOR_ATTN_K,
+                LLM_TENSOR_ATTN_V,
+                LLM_TENSOR_ATTN_OUT,
+                LLM_TENSOR_ATTN_ROT_EMBD,
+                LLM_TENSOR_FFN_GATE_INP,
+                LLM_TENSOR_FFN_NORM,
+                LLM_TENSOR_FFN_PRED_UP,
+                LLM_TENSOR_FFN_PRED_DOWN,
+                LLM_TENSOR_FFN_GATE,
+                LLM_TENSOR_FFN_DOWN,
+                LLM_TENSOR_FFN_DOWN_T,
+                LLM_TENSOR_FFN_UP,
+                LLM_TENSOR_FFN_GATE_EXP,
+                LLM_TENSOR_FFN_DOWN_EXP,
+                LLM_TENSOR_FFN_UP_EXP,
+                LLM_TENSOR_FFN_GATE_EXPS,
+                LLM_TENSOR_FFN_DOWN_EXPS,
+                LLM_TENSOR_FFN_UP_EXPS,
+            };
         case LLM_ARCH_ARCEE:
         case LLM_ARCH_STARCODER2:
         case LLM_ARCH_NEMOTRON:
@@ -675,6 +713,21 @@ static std::set<llm_tensor> llm_get_tensor_names(llm_arch arch) {
                 LLM_TENSOR_FFN_DOWN,
                 LLM_TENSOR_FFN_UP,
             };
+        case LLM_ARCH_RELUFALCON:
+            return {
+                LLM_TENSOR_TOKEN_EMBD,
+                LLM_TENSOR_OUTPUT_NORM,
+                LLM_TENSOR_OUTPUT,
+                LLM_TENSOR_ATTN_NORM,
+                LLM_TENSOR_ATTN_NORM_2,
+                LLM_TENSOR_ATTN_QKV,
+                LLM_TENSOR_ATTN_OUT,
+                LLM_TENSOR_FFN_PRED_UP,
+                LLM_TENSOR_FFN_PRED_DOWN,
+                LLM_TENSOR_FFN_DOWN,
+                LLM_TENSOR_FFN_DOWN_T,
+                LLM_TENSOR_FFN_UP,
+            };
         case LLM_ARCH_GROK:
             return {
                 LLM_TENSOR_TOKEN_EMBD,
@@ -715,6 +768,24 @@ static std::set<llm_tensor> llm_get_tensor_names(llm_arch arch) {
                 LLM_TENSOR_FFN_NORM,
                 LLM_TENSOR_FFN_UP,
                 LLM_TENSOR_FFN_DOWN,
+            };
+        case LLM_ARCH_OPT:
+            return {
+                LLM_TENSOR_TOKEN_EMBD,
+                LLM_TENSOR_POS_EMBD,
+                LLM_TENSOR_OUTPUT_NORM,
+                LLM_TENSOR_OUTPUT,
+                LLM_TENSOR_ATTN_NORM,
+                LLM_TENSOR_ATTN_Q,
+                LLM_TENSOR_ATTN_K,
+                LLM_TENSOR_ATTN_V,
+                LLM_TENSOR_ATTN_OUT,
+                LLM_TENSOR_FFN_NORM,
+                LLM_TENSOR_FFN_PRED_UP,
+                LLM_TENSOR_FFN_PRED_DOWN,
+                LLM_TENSOR_FFN_UP,
+                LLM_TENSOR_FFN_DOWN,
+                LLM_TENSOR_FFN_DOWN_T,
             };
         case LLM_ARCH_GPTNEOX:
             return {
@@ -767,6 +838,24 @@ static std::set<llm_tensor> llm_get_tensor_names(llm_arch arch) {
                 LLM_TENSOR_FFN_NORM,
                 LLM_TENSOR_FFN_GATE,
                 LLM_TENSOR_FFN_DOWN,
+                LLM_TENSOR_FFN_UP,
+            };
+        case LLM_ARCH_SPARSEQWEN2:
+            return {
+                LLM_TENSOR_TOKEN_EMBD,
+                LLM_TENSOR_OUTPUT_NORM,
+                LLM_TENSOR_OUTPUT,
+                LLM_TENSOR_ATTN_NORM,
+                LLM_TENSOR_ATTN_Q,
+                LLM_TENSOR_ATTN_K,
+                LLM_TENSOR_ATTN_V,
+                LLM_TENSOR_ATTN_OUT,
+                LLM_TENSOR_FFN_NORM,
+                LLM_TENSOR_FFN_PRED_UP,
+                LLM_TENSOR_FFN_PRED_DOWN,
+                LLM_TENSOR_FFN_GATE,
+                LLM_TENSOR_FFN_DOWN,
+                LLM_TENSOR_FFN_DOWN_T,
                 LLM_TENSOR_FFN_UP,
             };
         case LLM_ARCH_BERT:
@@ -2584,8 +2673,11 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_ATTN_QKV,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_ATTN_OUT,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_ATTN_GATE,                  {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_FFN_PRED_UP,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_FFN_PRED_DOWN,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_FFN_GATE,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_FFN_DOWN,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_FFN_DOWN_T,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_FFN_UP,                     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_FFN_DOWN_SHEXP,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_FFN_GATE_SHEXP,             {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},

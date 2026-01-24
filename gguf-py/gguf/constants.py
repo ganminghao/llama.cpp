@@ -348,6 +348,9 @@ class Keys:
         BETA                = "xielu.beta"
         EPS                 = "xielu.eps"
 
+    class Predictor:
+        LOW_RANKS           = "predictor.low_ranks"
+
 
 #
 # recommended mapping of model tensor names for storage in gguf
@@ -364,13 +367,17 @@ class GGUFType:
 class MODEL_ARCH(IntEnum):
     MMPROJ           = auto() # dummy arch for clip.cpp
     LLAMA            = auto()
+    PROSPARSE_LLAMA  = auto()
+    BAMBOO           = auto()
     LLAMA4           = auto()
     DECI             = auto()
     FALCON           = auto()
+    RELUFALCON       = auto()
     FALCON_H1        = auto()
     BAICHUAN         = auto()
     GROK             = auto()
     GPT2             = auto()
+    OPT              = auto()
     GPTJ             = auto()
     GPTNEOX          = auto()
     MPT              = auto()
@@ -388,6 +395,7 @@ class MODEL_ARCH(IntEnum):
     STABLELM         = auto()
     QWEN             = auto()
     QWEN2            = auto()
+    SPARSEQWEN2      = auto()
     QWEN2MOE         = auto()
     QWEN2VL          = auto()
     QWEN3            = auto()
@@ -529,8 +537,11 @@ class MODEL_TENSOR(IntEnum):
     FFN_NORM             = auto()
     FFN_PRE_NORM         = auto()
     FFN_POST_NORM        = auto()
+    FFN_PRED_UP          = auto()
+    FFN_PRED_DOWN        = auto()
     FFN_GATE             = auto()
     FFN_DOWN             = auto()
+    FFN_DOWN_T           = auto()
     FFN_UP               = auto()
     FFN_ACT              = auto()
     FFN_NORM_EXP         = auto()
@@ -811,12 +822,16 @@ class MODEL_TENSOR(IntEnum):
 MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.MMPROJ:           "clip", # dummy arch for clip.cpp
     MODEL_ARCH.LLAMA:            "llama",
+    MODEL_ARCH.PROSPARSE_LLAMA:  "prosparse-llama",
+    MODEL_ARCH.BAMBOO:           "bamboo",
     MODEL_ARCH.LLAMA4:           "llama4",
     MODEL_ARCH.DECI:             "deci",
     MODEL_ARCH.FALCON:           "falcon",
+    MODEL_ARCH.RELUFALCON:       "relu-falcon",
     MODEL_ARCH.BAICHUAN:         "baichuan",
     MODEL_ARCH.GROK:             "grok",
     MODEL_ARCH.GPT2:             "gpt2",
+    MODEL_ARCH.OPT:              "opt",
     MODEL_ARCH.GPTJ:             "gptj",
     MODEL_ARCH.GPTNEOX:          "gptneox",
     MODEL_ARCH.MPT:              "mpt",
@@ -834,6 +849,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.STABLELM:         "stablelm",
     MODEL_ARCH.QWEN:             "qwen",
     MODEL_ARCH.QWEN2:            "qwen2",
+    MODEL_ARCH.SPARSEQWEN2:      "sparse-qwen2",
     MODEL_ARCH.QWEN2MOE:         "qwen2moe",
     MODEL_ARCH.QWEN2VL:          "qwen2vl",
     MODEL_ARCH.QWEN3:            "qwen3",
@@ -975,8 +991,11 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.FFN_NORM:                  "blk.{bid}.ffn_norm",
     MODEL_TENSOR.FFN_PRE_NORM:              "blk.{bid}.ffn_norm",
     MODEL_TENSOR.FFN_POST_NORM:             "blk.{bid}.post_ffw_norm",
+    MODEL_TENSOR.FFN_PRED_UP:               "blk.{bid}.ffn_pred_up",
+    MODEL_TENSOR.FFN_PRED_DOWN:             "blk.{bid}.ffn_pred_down",
     MODEL_TENSOR.FFN_GATE:                  "blk.{bid}.ffn_gate",
     MODEL_TENSOR.FFN_DOWN:                  "blk.{bid}.ffn_down",
+    MODEL_TENSOR.FFN_DOWN_T:                "blk.{bid}.ffn_down_t",
     MODEL_TENSOR.FFN_UP:                    "blk.{bid}.ffn_up",
     MODEL_TENSOR.FFN_GATE_SHEXP:            "blk.{bid}.ffn_gate_shexp",
     MODEL_TENSOR.FFN_DOWN_SHEXP:            "blk.{bid}.ffn_down_shexp",
@@ -1381,6 +1400,52 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_DOWN_EXP,
         MODEL_TENSOR.FFN_UP_EXP,
     ],
+    MODEL_ARCH.PROSPARSE_LLAMA: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.ATTN_ROT_EMBD,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_PRED_UP,
+        MODEL_TENSOR.FFN_PRED_DOWN,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_DOWN_T,
+        MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.FFN_GATE_EXP,
+        MODEL_TENSOR.FFN_DOWN_EXP,
+        MODEL_TENSOR.FFN_UP_EXP,
+    ],
+    MODEL_ARCH.BAMBOO: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.ATTN_ROT_EMBD,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_PRED_UP,
+        MODEL_TENSOR.FFN_PRED_DOWN,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_DOWN_T,
+        MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.FFN_GATE_EXP,
+        MODEL_TENSOR.FFN_DOWN_EXP,
+        MODEL_TENSOR.FFN_UP_EXP,
+    ],
     MODEL_ARCH.LLAMA4: [
         MODEL_TENSOR.TOKEN_EMBD,
         MODEL_TENSOR.OUTPUT_NORM,
@@ -1467,6 +1532,20 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.ATTN_QKV,
         MODEL_TENSOR.ATTN_OUT,
         MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+    ],
+    MODEL_ARCH.RELUFALCON: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_NORM_2,
+        MODEL_TENSOR.ATTN_QKV,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.FFN_PRED_UP,
+        MODEL_TENSOR.FFN_PRED_DOWN,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_DOWN_T,
         MODEL_TENSOR.FFN_UP,
     ],
     MODEL_ARCH.BAICHUAN: [
@@ -1711,6 +1790,24 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_NORM,
         MODEL_TENSOR.FFN_GATE,
         MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+    ],
+    MODEL_ARCH.SPARSEQWEN2: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_PRED_UP,
+        MODEL_TENSOR.FFN_PRED_DOWN,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_DOWN_T,
         MODEL_TENSOR.FFN_UP,
     ],
     MODEL_ARCH.DREAM: [
@@ -2001,6 +2098,23 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.ATTN_OUT,
         MODEL_TENSOR.FFN_NORM,
         MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+    ],
+    MODEL_ARCH.OPT: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.POS_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_PRED_UP,
+        MODEL_TENSOR.FFN_PRED_DOWN,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_DOWN_T,
         MODEL_TENSOR.FFN_UP,
     ],
     MODEL_ARCH.PHI2: [
@@ -3700,6 +3814,14 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
 # tensors that will not be serialized
 MODEL_TENSOR_SKIP: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
     MODEL_ARCH.LLAMA: [
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_ROT_EMBD,
+    ],
+    MODEL_ARCH.PROSPARSE_LLAMA: [
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_ROT_EMBD,
+    ],
+    MODEL_ARCH.BAMBOO: [
         MODEL_TENSOR.ROPE_FREQS,
         MODEL_TENSOR.ATTN_ROT_EMBD,
     ],

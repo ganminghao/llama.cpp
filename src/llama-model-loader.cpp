@@ -511,6 +511,7 @@ llama_model_loader::llama_model_loader(
         void * set_tensor_data_ud,
         const std::string & fname,
         std::vector<std::string> & splits,
+        bool use_sparkinfer,
         bool use_mmap,
         bool use_direct_io,
         bool check_tensors,
@@ -778,6 +779,7 @@ llama_model_loader::llama_model_loader(
         use_mmap = false;
     }
 
+    this->use_sparkinfer = use_sparkinfer;
     this->use_mmap = use_mmap;
     this->use_direct_io = use_direct_io;
     this->check_tensors = check_tensors;

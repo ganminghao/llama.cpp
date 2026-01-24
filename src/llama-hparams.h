@@ -201,6 +201,9 @@ struct llama_hparams {
     std::array<float, LLAMA_MAX_LAYERS> xielu_beta;
     std::array<float, LLAMA_MAX_LAYERS> xielu_eps;
 
+    // predictor low_ranks
+    std::array<uint32_t, LLAMA_MAX_LAYERS> predictor_low_ranks;
+
     // DSA (deepseek sparse attention)
     uint32_t indexer_n_head    = 0;
     uint32_t indexer_head_size = 0;

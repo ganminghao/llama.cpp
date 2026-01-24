@@ -436,6 +436,10 @@ struct common_params {
     bool        save_logits       = false;  // whether to save logits to files                              // NOLINT
     std::vector<std::string> tensor_filter; // filter tensor names for debug output (regex)                 // NOLINT
 
+    // sparkinfer specific options
+    std::string spif_ms_path;
+    int64_t     vram_budget = 0;
+
     std::vector<std::string> in_files;   // all input files
     std::vector<std::string> antiprompt; // strings upon which more user input is prompted (a.k.a. reverse prompts)
     std::vector<llama_model_kv_override> kv_overrides;
@@ -494,7 +498,7 @@ struct common_params {
     bool verbose_prompt    = false; // print prompt tokens before generation
     bool display_prompt    = true;  // print prompt before generation
     bool no_kv_offload     = false; // disable KV offloading
-    bool warmup            = true;  // warmup run
+    bool warmup            = false; // warmup run
     bool check_tensors     = false; // validate tensor data
     bool no_op_offload     = false; // globally disable offload host tensor operations to device
     bool no_extra_bufts    = false; // disable extra buffer types (used for weight repacking)
@@ -921,6 +925,17 @@ const char * const LLM_KV_SPLIT_NO            = "split.no";
 const char * const LLM_KV_SPLIT_COUNT         = "split.count";
 const char * const LLM_KV_SPLIT_TENSORS_COUNT = "split.tensors.count";
 
+}
+
+// only match the ffn weights (not including the bias) in sparkinfer
+const char * const LLM_FFN_REGEX = "\\.ffn_(up|gate|down|down_t)\\.weight";
+
+static std::string llm_ffn_ffn_block_regex(int idx) {
+    return string_format("blk\\.%d%s", idx, LLM_FFN_REGEX);
+}
+
+static llama_model_tensor_buft_override llm_ffn_cpu_override() {
+    return { LLM_FFN_REGEX, ggml_backend_cpu_buffer_type() };
 }
 
 //

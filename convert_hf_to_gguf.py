@@ -76,6 +76,24 @@ class ModelType(IntEnum):
 AnyModel = TypeVar("AnyModel", bound="type[ModelBase]")
 
 
+class LowRankPredictor(torch.nn.Module):
+
+    def __init__(self, in_dim, low_rank, out_dim, bias):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(in_dim, low_rank, bias=bias)
+        self.relu = torch.nn.ReLU()
+        self.fc2 = torch.nn.Linear(low_rank, out_dim, bias=bias)
+
+    @staticmethod
+    def load_from_file(model_file, bias):
+        state_dict = torch.load(model_file, map_location="cpu", weights_only=True)
+        low_rank, in_dim = state_dict["fc1.weight"].shape
+        out_dim, _ = state_dict["fc2.weight"].shape
+        model = LowRankPredictor(in_dim, low_rank, out_dim, bias)
+        model.load_state_dict(state_dict, strict=False)
+        return model, low_rank
+
+
 class ModelBase:
     _model_classes: dict[ModelType, dict[str, type[ModelBase]]] = {
         ModelType.TEXT: {},
@@ -1324,6 +1342,9 @@ class TextModel(ModelBase):
             res = "starcoder"
         if chkhsh == "3ce83efda5659b07b1ad37ca97ca5797ea4285d9b9ab0dc679e4a720c9da7454":
             # ref: https://huggingface.co/openai-community/gpt2
+            res = "gpt-2"
+        if chkhsh == "2c934e5e1c8275b75011b9942836389a87eaa1a63116104e52424515e7649c46":
+            # ref: https://huggingface.co/facebook/opt-6.7b
             res = "gpt-2"
         if chkhsh == "32d85c31273f8019248f2559fed492d929ea28b17e51d81d3bb36fff23ca72b3":
             # ref: https://huggingface.co/stabilityai/stablelm-2-zephyr-1_6b
@@ -2581,6 +2602,51 @@ class FalconModel(TextModel):
         yield from super().modify_tensors(data_torch, name, bid)
 
 
+@ModelBase.register("ReluFalconForCausalLM")
+class ReluFalconModel(FalconModel):
+    model_arch = gguf.MODEL_ARCH.RELUFALCON
+
+    def _pred_path(self):
+        return getattr(self, "pred_path", None)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        if not hasattr(self, "predictor_low_ranks"):
+            self.predictor_low_ranks = [0] * self.hparams["num_hidden_layers"]
+        self.gguf_writer.add_predictor_low_ranks(self.predictor_low_ranks)
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        yield from super().get_tensors()
+
+        pred_path = self._pred_path()
+        if not pred_path:
+            return
+        pred_bias = getattr(self, "pred_bias", False)
+        self.predictor_low_ranks = [0] * self.hparams["num_hidden_layers"]
+        for bid in range(self.hparams["num_hidden_layers"]):
+            ckpt_file = list(pred_path.glob(f"L{bid}-*.pt"))[0]
+            model, low_rank = LowRankPredictor.load_from_file(ckpt_file, pred_bias)
+            self.predictor_low_ranks[bid] = low_rank
+
+            for k, l in (gguf.MODEL_TENSOR.FFN_PRED_UP, model.fc1), (gguf.MODEL_TENSOR.FFN_PRED_DOWN, model.fc2):
+                yield self.format_tensor_name(k, bid, ".weight"), l.weight
+                if pred_bias:
+                    yield self.format_tensor_name(k, bid, ".bias"), l.bias
+            del model
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if (".ffn_pred_up." in name or ".ffn_pred_down." in name):
+            yield name, data_torch
+            return
+
+        for tensor_name, tensor_data in super().modify_tensors(data_torch, name, bid):
+            if self._pred_path() and self.match_model_tensor_name(tensor_name, gguf.MODEL_TENSOR.FFN_DOWN, bid):
+                yield self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN, bid), tensor_data
+                yield self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_T, bid), tensor_data.T.contiguous()
+                continue
+            yield tensor_name, tensor_data
+
+
 @ModelBase.register("GPTBigCodeForCausalLM")
 class StarCoderModel(TextModel):
     model_arch = gguf.MODEL_ARCH.STARCODER
@@ -2938,6 +3004,56 @@ class LlamaModel(TextModel):
             experts = [k for d in self._experts for k in d.keys()]
             if len(experts) > 0:
                 raise ValueError(f"Unprocessed experts: {experts}")
+
+
+@ModelBase.register("ProSparseLlamaForCausalLM")
+class ProSparseLlamaModel(LlamaModel):
+    model_arch = gguf.MODEL_ARCH.PROSPARSE_LLAMA
+
+    def _pred_path(self):
+        return getattr(self, "pred_path", None)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        if not hasattr(self, "predictor_low_ranks"):
+            self.predictor_low_ranks = [0] * self.hparams["num_hidden_layers"]
+        self.gguf_writer.add_predictor_low_ranks(self.predictor_low_ranks)
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        yield from super().get_tensors()
+
+        pred_path = self._pred_path()
+        if not pred_path:
+            return
+        pred_bias = getattr(self, "pred_bias", False)
+        self.predictor_low_ranks = [0] * self.hparams["num_hidden_layers"]
+        for bid in range(self.hparams["num_hidden_layers"]):
+            ckpt_file = list(pred_path.glob(f"L{bid}-*.pt"))[0]
+            model, low_rank = LowRankPredictor.load_from_file(ckpt_file, pred_bias)
+            self.predictor_low_ranks[bid] = low_rank
+
+            for k, l in (gguf.MODEL_TENSOR.FFN_PRED_UP, model.fc1), (gguf.MODEL_TENSOR.FFN_PRED_DOWN, model.fc2):
+                yield self.format_tensor_name(k, bid, ".weight"), l.weight
+                if pred_bias:
+                    yield self.format_tensor_name(k, bid, ".bias"), l.bias
+            del model
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if (".ffn_pred_up." in name or ".ffn_pred_down." in name):
+            yield name, data_torch
+            return
+
+        for tensor_name, tensor_data in super().modify_tensors(data_torch, name, bid):
+            if self._pred_path() and self.match_model_tensor_name(tensor_name, gguf.MODEL_TENSOR.FFN_DOWN, bid):
+                yield self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN, bid), tensor_data
+                yield self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_T, bid), tensor_data.T.contiguous()
+                continue
+            yield tensor_name, tensor_data
+
+
+@ModelBase.register("BambooForCausalLM")
+class BambooModel(ProSparseLlamaModel):
+    model_arch = gguf.MODEL_ARCH.BAMBOO
 
 
 @ModelBase.register("ArceeForCausalLM")
@@ -3753,6 +3869,51 @@ class Qwen2Model(TextModel):
             # skip vision and audio tensors
             return
         yield from super().modify_tensors(data_torch, name, bid)
+
+
+@ModelBase.register("SparseQwen2ForCausalLM")
+class SparseQwen2(Qwen2Model):
+    model_arch = gguf.MODEL_ARCH.SPARSEQWEN2
+
+    def _pred_path(self):
+        return getattr(self, "pred_path", None)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        if not hasattr(self, "predictor_low_ranks"):
+            self.predictor_low_ranks = [0] * self.hparams["num_hidden_layers"]
+        self.gguf_writer.add_predictor_low_ranks(self.predictor_low_ranks)
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        yield from super().get_tensors()
+
+        pred_path = self._pred_path()
+        if not pred_path:
+            return
+        pred_bias = getattr(self, "pred_bias", False)
+        self.predictor_low_ranks = [0] * self.hparams["num_hidden_layers"]
+        for bid in range(self.hparams["num_hidden_layers"]):
+            ckpt_file = list(pred_path.glob(f"L{bid}-*.pt"))[0]
+            model, low_rank = LowRankPredictor.load_from_file(ckpt_file, pred_bias)
+            self.predictor_low_ranks[bid] = low_rank
+
+            for k, l in (gguf.MODEL_TENSOR.FFN_PRED_UP, model.fc1), (gguf.MODEL_TENSOR.FFN_PRED_DOWN, model.fc2):
+                yield self.format_tensor_name(k, bid, ".weight"), l.weight
+                if pred_bias:
+                    yield self.format_tensor_name(k, bid, ".bias"), l.bias
+            del model
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if (".ffn_pred_up." in name or ".ffn_pred_down." in name):
+            yield name, data_torch
+            return
+
+        for tensor_name, tensor_data in super().modify_tensors(data_torch, name, bid):
+            if self._pred_path() and self.match_model_tensor_name(tensor_name, gguf.MODEL_TENSOR.FFN_DOWN, bid):
+                yield self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN, bid), tensor_data
+                yield self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_T, bid), tensor_data.T.contiguous()
+                continue
+            yield tensor_name, tensor_data
 
 
 @ModelBase.register("DreamModel")
@@ -5064,6 +5225,62 @@ class GPT2Model(TextModel):
         new_name = self.map_tensor_name(name)
 
         yield from super().modify_tensors(data_torch, new_name, bid)
+
+
+@ModelBase.register("OPTForCausalLM")
+class OPTModel(TextModel):
+    model_arch = gguf.MODEL_ARCH.OPT
+
+    def _pred_path(self):
+        return getattr(self, "pred_path", None)
+
+    def set_vocab(self):
+        self._set_vocab_gpt2()
+
+    def set_gguf_parameters(self):
+        self.gguf_writer.add_block_count(self.hparams["num_hidden_layers"])
+        self.gguf_writer.add_context_length(self.hparams["max_position_embeddings"])
+        self.gguf_writer.add_embedding_length(self.hparams["hidden_size"])
+        self.gguf_writer.add_feed_forward_length(self.hparams["ffn_dim"])
+        self.gguf_writer.add_head_count(self.hparams["num_attention_heads"])
+        self.gguf_writer.add_layer_norm_eps(self.hparams.get("layer_norm_epsilon", 1e-5))
+        self.gguf_writer.add_file_type(self.ftype)
+        if not hasattr(self, "predictor_low_ranks"):
+            self.predictor_low_ranks = [0] * self.hparams["num_hidden_layers"]
+        self.gguf_writer.add_predictor_low_ranks(self.predictor_low_ranks)
+
+    def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
+        yield from super().get_tensors()
+
+        pred_path = self._pred_path()
+        if not pred_path:
+            return
+        pred_bias = getattr(self, "pred_bias", False)
+        self.predictor_low_ranks = [0] * self.hparams["num_hidden_layers"]
+        for bid in range(self.hparams["num_hidden_layers"]):
+            ckpt_file = list(pred_path.glob(f"L{bid}-*.pt"))[0]
+            model, low_rank = LowRankPredictor.load_from_file(ckpt_file, pred_bias)
+            self.predictor_low_ranks[bid] = low_rank
+
+            for k, l in (gguf.MODEL_TENSOR.FFN_PRED_UP, model.fc1), (gguf.MODEL_TENSOR.FFN_PRED_DOWN, model.fc2):
+                yield self.format_tensor_name(k, bid, ".weight"), l.weight
+                if pred_bias:
+                    yield self.format_tensor_name(k, bid, ".bias"), l.bias
+            del model
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if (".ffn_pred_up." in name or ".ffn_pred_down." in name):
+            yield name, data_torch
+            return
+
+        for tensor_name, tensor_data in super().modify_tensors(data_torch, name, bid):
+            if tensor_name.startswith("position"):
+                tensor_data = tensor_data[2:].contiguous()
+            elif self._pred_path() and self.match_model_tensor_name(tensor_name, gguf.MODEL_TENSOR.FFN_DOWN, bid):
+                yield self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN, bid), tensor_data
+                yield self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_T, bid), tensor_data.T.contiguous()
+                continue
+            yield tensor_name, tensor_data
 
 
 @ModelBase.register("PhiForCausalLM")
@@ -12305,6 +12522,12 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
     )
     parser.add_argument(
+        "--pred-path", type=Path, default=None,
+    )
+    parser.add_argument(
+        "--pred-bias", action="store_true",
+    )
+    parser.add_argument(
         "--use-temp-file", action="store_true",
         help="use the tempfile library while processing (helpful when running out of memory, process killed)",
     )
@@ -12455,6 +12678,10 @@ def main() -> None:
         logger.error(f'Error: {dir_model} is not a directory')
         sys.exit(1)
 
+    if args.pred_path and not args.pred_path.is_dir():
+        logger.error(f'Error: {args.pred_path} is not a directory')
+        sys.exit(1)
+
     ftype_map: dict[str, gguf.LlamaFileType] = {
         "f32": gguf.LlamaFileType.ALL_F32,
         "f16": gguf.LlamaFileType.MOSTLY_F16,
@@ -12523,10 +12750,16 @@ def main() -> None:
             logger.info(f"Model vocab successfully exported to {model_instance.fname_out}")
         else:
             logger.info("Exporting model...")
+            setattr(model_instance, "pred_path", args.pred_path)
+            setattr(model_instance, "pred_bias", args.pred_bias)
             model_instance.write()
             out_path = f"{model_instance.fname_out.parent}{os.sep}" if is_split else model_instance.fname_out
             logger.info(f"Model successfully exported to {out_path}")
 
 
 if __name__ == '__main__':
+    '''
+    Example usage:
+        python convert_hf_to_gguf.py /path/to/hf --pred-path /path/to/predictor [--pred-bias] --outtype [bf16|f16] --outfile /path/to/gguf
+    '''
     main()

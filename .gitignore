@@ -143,3 +143,6 @@ poetry.toml
 /.windsurf/
 # emscripten
 a.out.*
+
+# sparkinfer eval scripts (bench removed)
+eval_scripts

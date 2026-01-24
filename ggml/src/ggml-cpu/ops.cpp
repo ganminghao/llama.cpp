@@ -2728,6 +2728,90 @@ void ggml_compute_forward_leaky_relu(
     }
 }
 
+// ggml_compute_forward_fatrelu
+
+static void ggml_compute_forward_fatrelu_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0];
+
+    if (params->ith != 0) {
+        return;
+    }
+
+    assert(ggml_is_contiguous_1(src0));
+    assert(ggml_is_contiguous_1(dst));
+    assert(ggml_are_same_shape(src0, dst));
+
+    const int n  = ggml_nrows(src0);
+    const int nc = src0->ne[0];
+
+    float threshold;
+    memcpy(&threshold, dst->op_params, sizeof(float));
+
+    assert(dst->nb[0]  == sizeof(float));
+    assert(src0->nb[0] == sizeof(float));
+
+    for (int i = 0; i < n; i++) {
+        ggml_vec_fatrelu_f32(nc,
+                (float *) ((char *) dst->data  + i*( dst->nb[1])),
+                (float *) ((char *) src0->data + i*(src0->nb[1])), threshold);
+    }
+}
+
+static void ggml_compute_forward_fatrelu_f16(
+    const ggml_compute_params * params,
+    ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0];
+
+    if (params->ith != 0) {
+        return;
+    }
+
+    assert(ggml_is_contiguous_1(src0));
+    assert(ggml_is_contiguous_1(dst));
+    assert(ggml_are_same_shape(src0, dst));
+
+    const int n  = ggml_nrows(src0);
+    const int nc = src0->ne[0];
+
+    float threshold;
+    memcpy(&threshold, dst->op_params, sizeof(float));
+
+    assert(dst->nb[0]  == sizeof(ggml_fp16_t));
+    assert(src0->nb[0] == sizeof(ggml_fp16_t));
+
+    for (int i = 0; i < n; i++) {
+        ggml_vec_fatrelu_f16(nc,
+                (ggml_fp16_t *) ((char *) dst->data  + i*( dst->nb[1])),
+                (ggml_fp16_t *) ((char *) src0->data + i*(src0->nb[1])), threshold);
+    }
+}
+
+void ggml_compute_forward_fatrelu(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0];
+
+    switch (src0->type) {
+        case GGML_TYPE_F32:
+            {
+                ggml_compute_forward_fatrelu_f32(params, dst);
+            } break;
+        case GGML_TYPE_F16:
+            {
+                ggml_compute_forward_fatrelu_f16(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
 // ggml_compute_forward_silu_back
 
 static void ggml_compute_forward_silu_back_f32(

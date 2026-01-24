@@ -153,6 +153,8 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    sparkinfer_init_from_model_and_ctx(model, ctx, nullptr, nullptr, params.spif_ms_path.c_str(), params.vram_budget);
+
     llama_memory_t mem = llama_get_memory(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
 

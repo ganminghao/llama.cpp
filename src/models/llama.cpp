@@ -111,13 +111,28 @@ llm_build_llama<embed>::llm_build_llama(const llama_model & model, const llm_gra
                     LLM_NORM_RMS, il);
             cb(cur, "ffn_norm", il);
 
-            cur = build_ffn(cur,
-                    model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   model.layers[il].ffn_up_s,
-                    model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, model.layers[il].ffn_gate_s,
-                    model.layers[il].ffn_down, model.layers[il].ffn_down_b, model.layers[il].ffn_down_s,
-                    NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
-            cb(cur, "ffn_out", il);
+            if (spif_cm != nullptr) {
+                cur = build_sparse_ffn(cur, inp_out_ids, &model, il);
+            } else {
+                ggml_tensor * model_layer_il_ffn_down = model.layers[il].ffn_down;
+                if (model.params.use_sparkinfer) {
+                    model_layer_il_ffn_down = ggml_reshape_2d(ctx0, model.layers[il].ffn_down_t,
+                                                model.layers[il].ffn_down_t->ne[1], model.layers[il].ffn_down_t->ne[0]);
+                }
+                llm_ffn_op_type ffn_op_type = LLM_FFN_SILU;
+                if (model.arch == LLM_ARCH_PROSPARSE_LLAMA) {
+                    ffn_op_type = LLM_FFN_FATRELU;
+                } else if (model.arch == LLM_ARCH_BAMBOO) {
+                    ffn_op_type = LLM_FFN_DRELU;
+                }
+                cur = build_ffn(cur,
+                        model.layers[il].ffn_up,   model.layers[il].ffn_up_b,   model.layers[il].ffn_up_s,
+                        model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, model.layers[il].ffn_gate_s,
+                        model_layer_il_ffn_down,   model.layers[il].ffn_down_b, model.layers[il].ffn_down_s,
+                        NULL,
+                        ffn_op_type, LLM_FFN_PAR, il);
+                cb(cur, "ffn_out", il);
+            }
         } else {
             // MoE branch
             cur = build_norm(ffn_inp,

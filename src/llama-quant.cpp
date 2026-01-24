@@ -33,6 +33,7 @@ enum class tensor_category {
     FFN_UP,
     FFN_GATE,
     FFN_DOWN,
+    FFN_DOWN_T,
     OUTPUT,
     OTHER
 };
@@ -144,6 +145,9 @@ static tensor_category tensor_get_category(const std::string & tensor_name) {
     if (tensor_name.find("ffn_gate") != std::string::npos) {
         return tensor_category::FFN_GATE;
     }
+    if (tensor_name.find("ffn_down_t") != std::string::npos) {
+        return tensor_category::FFN_DOWN_T;
+    }
     if (tensor_name.find("ffn_down") != std::string::npos) {
         return tensor_category::FFN_DOWN;
     }
@@ -167,10 +171,12 @@ struct quantize_state_impl {
 
     int n_attention_wv = 0;
     int n_ffn_down     = 0;
+    int n_ffn_down_t   = 0;
     int n_ffn_gate     = 0;
     int n_ffn_up       = 0;
     int i_attention_wv = 0;
     int i_ffn_down     = 0;
+    int i_ffn_down_t   = 0;
     int i_ffn_gate     = 0;
     int i_ffn_up       = 0;
 
@@ -495,6 +501,12 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             }
             ++qs.i_ffn_down;
         }
+        else if (category == tensor_category::FFN_DOWN_T) {
+            if (qs.i_ffn_down_t < qs.n_ffn_down_t/8) {
+                new_type = ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M ? GGML_TYPE_IQ3_S : GGML_TYPE_Q2_K;
+            }
+            ++qs.i_ffn_down_t;
+        }
         else if (category == tensor_category::ATTENTION_OUTPUT) {
             if (qs.model.hparams.n_expert == 8) {
                 new_type = GGML_TYPE_Q5_K;
@@ -605,6 +617,51 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             new_type = ftype == LLAMA_FTYPE_MOSTLY_Q4_0 ? GGML_TYPE_Q4_1 : GGML_TYPE_Q5_1;
         }
         ++qs.i_ffn_down;
+    } else if (category == tensor_category::FFN_DOWN_T) {
+        auto info = layer_info(qs.i_ffn_down_t, qs.n_ffn_down_t, name.c_str());
+        int i_layer = info.first, n_layer = info.second;
+        if      (ftype == LLAMA_FTYPE_MOSTLY_Q2_K) new_type = GGML_TYPE_Q3_K;
+        else if (ftype == LLAMA_FTYPE_MOSTLY_Q2_K_S) {
+            if (i_layer < n_layer/8) new_type = GGML_TYPE_Q4_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS && !qs.has_imatrix) {
+            new_type = i_layer < n_layer/8 ? GGML_TYPE_Q4_K : GGML_TYPE_Q3_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M) {
+            new_type = i_layer < n_layer/16 ? GGML_TYPE_Q5_K
+                     : arch != LLM_ARCH_FALCON || use_more_bits(i_layer, n_layer) ? GGML_TYPE_Q4_K
+                     : GGML_TYPE_Q3_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_M && (i_layer < n_layer/8 ||
+                    (qs.model.hparams.n_expert == 8 && use_more_bits(i_layer, n_layer)))) {
+            new_type = GGML_TYPE_Q4_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) {
+            new_type = arch == LLM_ARCH_FALCON ? GGML_TYPE_Q4_K : GGML_TYPE_Q5_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M) {
+            if (arch == LLM_ARCH_FALCON) {
+                new_type = i_layer < n_layer/16 ? GGML_TYPE_Q6_K :
+                           use_more_bits(i_layer, n_layer) ? GGML_TYPE_Q5_K : GGML_TYPE_Q4_K;
+            } else {
+                if (use_more_bits(i_layer, n_layer)) new_type = GGML_TYPE_Q6_K;
+            }
+        }
+        else if (i_layer < n_layer/8 && (ftype == LLAMA_FTYPE_MOSTLY_IQ4_NL || ftype == LLAMA_FTYPE_MOSTLY_IQ4_XS) && !qs.has_imatrix) {
+            new_type = GGML_TYPE_Q5_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_Q5_K_M && use_more_bits(i_layer, n_layer)) new_type = GGML_TYPE_Q6_K;
+        else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_S && arch != LLM_ARCH_FALCON && i_layer < n_layer/8) {
+            new_type = GGML_TYPE_Q5_K;
+        }
+        else if ((ftype == LLAMA_FTYPE_MOSTLY_Q4_0 || ftype == LLAMA_FTYPE_MOSTLY_Q5_0)
+                && qs.has_imatrix && i_layer < n_layer/8) {
+            // Guard against craziness in the first few ffn_down layers that can happen even with imatrix for Q4_0/Q5_0.
+            // We only do it when an imatrix is provided because a) we want to make sure that one can always get the
+            // same quantization as before imatrix stuff, and b) Q4_1/Q5_1 do go crazy on ffn_down without an imatrix.
+            new_type = ftype == LLAMA_FTYPE_MOSTLY_Q4_0 ? GGML_TYPE_Q4_1 : GGML_TYPE_Q5_1;
+        }
+        ++qs.i_ffn_down_t;
     } else if (category == tensor_category::ATTENTION_OUTPUT) {
         if (arch != LLM_ARCH_FALCON) {
             if (qs.model.hparams.n_expert == 8) {
@@ -859,7 +916,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
     std::vector<std::string> splits = {};
     llama_model_loader ml(/*metadata*/ nullptr, /*set_tensor_data*/ nullptr, /*set_tensor_data_ud*/ nullptr,
-        fname_inp, splits, use_mmap, /*use_direct_io*/ false, /*check_tensors*/ true, /*no_alloc*/ false, kv_overrides, nullptr);
+        fname_inp, splits, /*use_sparkinfer*/ false, use_mmap, /*use_direct_io*/ false, /*check_tensors*/ true, /*no_alloc*/ false, kv_overrides, nullptr);
     ml.init_mappings(false); // no prefetching
 
     llama_model model(llama_model_default_params());
@@ -989,7 +1046,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             metadata[i].category = cat; // save and re-use the category while we're at it
         }
         // these also need to be set to n_layer by default
-        qs.n_ffn_down = qs.n_ffn_gate = qs.n_ffn_up = (int)qs.model.hparams.n_layer;
+        qs.n_ffn_down = qs.n_ffn_down_t = qs.n_ffn_gate = qs.n_ffn_up = (int)qs.model.hparams.n_layer;
     }
 
     // flag for --dry-run

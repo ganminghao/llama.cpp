@@ -1,6 +1,7 @@
 #include "ggml-cuda.h"
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
+#include "ggml-sparkinfer.hpp"
 
 #include "ggml-cuda/common.cuh"
 #include "ggml-cuda/acc.cuh"
@@ -29,6 +30,10 @@
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
+#include "ggml-cuda/mm-sparse.cuh"
+#include "ggml-cuda/mmq-sparse.cuh"
+#include "ggml-cuda/axpy-sparse.cuh"
+#include "ggml-cuda/axpyq-sparse.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
 #include "ggml-cuda/opt-step-sgd.cuh"
@@ -45,6 +50,7 @@
 #include "ggml-cuda/ssm-scan.cuh"
 #include "ggml-cuda/sum.cuh"
 #include "ggml-cuda/sumrows.cuh"
+#include "ggml-cuda/sumcols.cuh"
 #include "ggml-cuda/top-k.cuh"
 #include "ggml-cuda/mean.cuh"
 #include "ggml-cuda/tsembd.cuh"
@@ -84,6 +90,30 @@
 #include <vector>
 #include <unordered_set>
 
+#ifdef USE_NVTX
+#include <nvtx3/nvToolsExt.h>
+
+static inline nvtxRangeId_t nvtx_init(const int tid, const char * op, const char * dev) {
+    nvtxEventAttributes_t attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.version     = NVTX_VERSION;
+    attr.size        = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+    attr.colorType   = NVTX_COLOR_ARGB;
+    attr.messageType = NVTX_MESSAGE_TYPE_ASCII;
+
+    static thread_local char message[256];
+    if (tid == -1) {
+        attr.color = 0xff00ffa0;
+    } else {
+        attr.color = 0xffff7f24;
+    }
+    snprintf(message, sizeof(message), "%s_%s", op, dev);
+    attr.message.ascii = message;
+
+    return nvtxRangeStartEx(&attr);
+}
+#endif
+
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
 [[noreturn]]
@@ -101,12 +131,12 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
 // this is faster on Windows
 // probably because the Windows CUDA libraries forget to make this check before invoking the drivers
 void ggml_cuda_set_device(int device) {
-    int current_device;
-    CUDA_CHECK(cudaGetDevice(&current_device));
+    // int current_device;
+    // CUDA_CHECK(cudaGetDevice(&current_device));
 
-    if (device == current_device) {
-        return;
-    }
+    // if (device == current_device) {
+    //     return;
+    // }
 
     CUDA_CHECK(cudaSetDevice(device));
 }
@@ -656,6 +686,20 @@ static void ggml_backend_cuda_buffer_get_tensor(ggml_backend_buffer_t buffer, co
     CUDA_CHECK(cudaStreamSynchronize(cudaStreamPerThread));
 }
 
+static void ggml_backend_cuda_buffer_set_tensor_async(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+    ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
+
+    ggml_cuda_set_device(ctx->device);
+    CUDA_CHECK(cudaMemcpyAsync((char *)tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
+}
+
+static void ggml_backend_cuda_buffer_get_tensor_async(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+    ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
+
+    ggml_cuda_set_device(ctx->device);
+    CUDA_CHECK(cudaMemcpyAsync(data, (const char *)tensor->data + offset, size, cudaMemcpyDeviceToHost, cudaStreamPerThread));
+}
+
 static bool ggml_backend_cuda_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * src, ggml_tensor * dst) {
     if (ggml_backend_buffer_is_cuda(src->buffer)) {
         ggml_backend_cuda_buffer_context * src_ctx = (ggml_backend_cuda_buffer_context *)src->buffer->context;
@@ -695,6 +739,8 @@ static const ggml_backend_buffer_i ggml_backend_cuda_buffer_interface = {
     /* .cpy_tensor      = */ ggml_backend_cuda_buffer_cpy_tensor,
     /* .clear           = */ ggml_backend_cuda_buffer_clear,
     /* .reset           = */ NULL,
+    /* .set_tensor_async= */ ggml_backend_cuda_buffer_set_tensor_async,
+    /* .get_tensor_async= */ ggml_backend_cuda_buffer_get_tensor_async,
 };
 
 // cuda buffer type
@@ -1007,6 +1053,8 @@ static const ggml_backend_buffer_i ggml_backend_cuda_split_buffer_interface = {
     /* .cpy_tensor      = */ NULL,
     /* .clear           = */ ggml_backend_cuda_split_buffer_clear,
     /* .reset           = */ NULL,
+    /* .set_tensor_async= */ NULL,
+    /* .get_tensor_async= */ NULL,
 };
 
 // cuda split buffer type
@@ -2477,6 +2525,186 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         nb1, nb2, nb3, stream);
 }
 
+static void ggml_cuda_mul_mat_sparse(ggml_backend_cuda_context & ctx,
+                                     const ggml_tensor *         src0,
+                                     const ggml_tensor *         src1,
+                                     ggml_tensor *               dst) {
+    GGML_ASSERT(dst->src[2] != NULL && "dst->src[2] must be present for sparse matrix multiplication");
+    switch (src0->type) {
+        case GGML_TYPE_F16:
+        case GGML_TYPE_BF16:
+            ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_sparse, nullptr);
+            break;
+        case GGML_TYPE_Q8_0:
+            ggml_cuda_mul_mat_sparse_q(ctx, src0, src1, dst);
+            break;
+        default:
+            GGML_ASSERT(false && "unsupported type for sparse matrix multiplication");
+    }
+}
+
+static void ggml_cuda_axpy_sparse(ggml_backend_cuda_context & ctx,
+                                  const ggml_tensor *         src0,
+                                  const ggml_tensor *         src1,
+                                  ggml_tensor *               dst) {
+    GGML_ASSERT(dst->src[2] != NULL && "dst->src[2] must be present for sparse matrix multiplication");
+    switch (src0->type) {
+        case GGML_TYPE_F16:
+        case GGML_TYPE_BF16:
+            ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_axpy_sparse, nullptr);
+            break;
+        case GGML_TYPE_Q8_0:
+            ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_axpy_sparse_q, nullptr);
+            break;
+        default:
+            GGML_ASSERT(false && "unsupported type for sparse matrix multiplication");
+    }
+}
+
+static void ggml_cuda_reload_plan(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    void * obj = nullptr;
+    memcpy((void *) &obj, &(dst->op_params[0]), sizeof(void *));
+    auto * spif_lc = (sparkinfer_layer_cache *) obj;
+
+    cudaStream_t main_stream = ctx.stream();
+    CUDA_CHECK(cudaMemcpyAsync((float *) spif_lc->weight_only_buf->data, (const float *) dst->src[0]->data,
+                               sizeof(float) * spif_lc->layer_cm.n_g, cudaMemcpyDeviceToHost, main_stream));
+    CUDA_CHECK(cudaMemcpyAsync((float *) spif_lc->cache_only_buf->data, (const float *) dst->src[1]->data,
+                               sizeof(float) * spif_lc->layer_cm.n_g, cudaMemcpyDeviceToHost, main_stream));
+    CUDA_CHECK(cudaMemcpyAsync((int32_t *) spif_lc->neuron_idx_buf->data, (int32_t *) spif_lc->neuron_idx->data,
+                               sizeof(int32_t) * spif_lc->layer_cm.m, cudaMemcpyDeviceToHost, main_stream));
+    CUDA_CHECK(cudaStreamSynchronize(main_stream));
+
+    spif_lc->sparkinfer_reload_plan();
+
+    CUDA_CHECK(cudaMemcpyAsync((int32_t *) spif_lc->neuron_idx->data, (int32_t *) spif_lc->neuron_idx_buf->data,
+                               sizeof(int32_t) * spif_lc->layer_cm.m, cudaMemcpyHostToDevice, main_stream));
+    CUDA_CHECK(cudaStreamSynchronize(main_stream));
+}
+
+struct sparkinfer_batch_reload_args {
+    void **              srcs      = nullptr;
+    void **              dsts      = nullptr;
+    size_t *             sizes     = nullptr;
+    size_t               count     = 0;
+    cudaStream_t         stream    = nullptr;
+    cudaMemcpyAttributes attrs     = {};
+    size_t               attrsIdxs = 0;
+    const char *         op_name   = nullptr;
+    int                  op_flag   = 0;
+};
+
+static inline sparkinfer_batch_reload_args * sparkinfer_make_batch_reload_args(char *       weight_base,
+                                                                               char *       cache_base,
+                                                                               size_t       nbytes,
+                                                                               cudaStream_t stream,
+                                                                               size_t       window_offset,
+                                                                               size_t       window_size,
+                                                                               copy_pair *  reload_plan,
+                                                                               const char * op_name,
+                                                                               int          op_flag) {
+    auto * args   = new sparkinfer_batch_reload_args;
+    args->count   = window_size;
+    args->stream  = stream;
+    args->op_name = op_name;
+    args->op_flag = op_flag;
+    args->srcs    = (void **) malloc(window_size * sizeof(void *));
+    args->dsts    = (void **) malloc(window_size * sizeof(void *));
+    args->sizes   = (size_t *) malloc(window_size * sizeof(size_t));
+    for (size_t i = 0; i < window_size; ++i) {
+        const auto & p = reload_plan[window_offset + i];
+        args->srcs[i]  = (void *) (weight_base + p.weight_idx * nbytes);
+        args->dsts[i]  = (void *) (cache_base + p.cache_idx * nbytes);
+        args->sizes[i] = nbytes;
+    }
+    args->attrs                = {};
+    args->attrs.srcAccessOrder = cudaMemcpySrcAccessOrderAny;
+    args->attrs.flags          = cudaMemcpyFlagPreferOverlapWithCompute;
+    args->attrsIdxs            = 0;
+    return args;
+}
+
+static void sparkinfer_batch_reload(sparkinfer_batch_reload_args * args) {
+#ifdef USE_NVTX
+    static thread_local nvtxRangeId_t id = 0;
+    if ((args->op_flag & 1) && id == 0) {
+        id = nvtx_init(-2, args->op_name, "CUDA");
+    }
+#else
+    GGML_UNUSED(args->op_name);
+    GGML_UNUSED(args->op_flag);
+#endif
+
+    CUDA_CHECK(cudaMemcpyBatchAsync(args->dsts, args->srcs, args->sizes, args->count, &args->attrs, &args->attrsIdxs, 1,
+                                    nullptr, args->stream));
+    CUDA_CHECK(cudaStreamSynchronize(args->stream));
+    free(args->srcs);
+    free(args->dsts);
+    free(args->sizes);
+    delete args;
+
+#ifdef USE_NVTX
+    if ((args->op_flag & 2) && id != 0) {
+        nvtxRangeEnd(id);
+        id = 0;
+    }
+#endif
+}
+
+static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    auto   spif_wt = (sparkinfer_weight_type) dst->op_params[0];
+    void * obj     = nullptr;
+    memcpy((void *) &obj, &(dst->op_params[1]), sizeof(void *));
+    auto * spif_lc = (sparkinfer_layer_cache *) obj;
+
+    // clang-format off
+    char * weight_base = nullptr;
+    char * cache_base  = nullptr;
+    switch (spif_wt) {
+        case SPIF_FFN_UP: {
+            weight_base = (char *) spif_lc->ffn_up->data;
+            cache_base  = (char *) spif_lc->ffn_up_cache->data;
+            } break;
+        case SPIF_FFN_GATE: {
+            weight_base = (char *) spif_lc->ffn_gate->data;
+            cache_base  = (char *) spif_lc->ffn_gate_cache->data;
+            } break;
+        case SPIF_FFN_DOWN: {
+            weight_base = (char *) spif_lc->ffn_down->data;
+            cache_base  = (char *) spif_lc->ffn_down_cache->data;
+            } break;
+    };
+    // clang-format on
+
+    auto *       spif_extra    = (sparkinfer_tensor_extra *) dst->extra;
+    auto *       spif_executor = (SingleThreadExecutor *) spif_extra->spif_executor;
+    const size_t grp_nbytes    = spif_lc->layer_cm.g * ggml_row_size(spif_lc->ffn_up->type, spif_lc->ffn_up->ne[0]);
+    for (size_t window_offset = 0; window_offset < spif_lc->reload_count;) {
+        size_t window_size = MIN(spif_lc->reload_window_size, spif_lc->reload_count - window_offset);
+
+        int op_flag = 0;
+        if (window_offset == 0) {
+            op_flag |= 1;
+        } else if (window_offset + window_size >= spif_lc->reload_count) {
+            op_flag |= 2;
+        }
+        spif_executor->post(
+            sparkinfer_batch_reload,
+            sparkinfer_make_batch_reload_args(weight_base, cache_base, grp_nbytes, cudaStreamPerThread, window_offset,
+                                              window_size, spif_lc->reload_plan, dst->name, op_flag));
+
+        window_offset += window_size;
+    }
+
+    if (spif_wt == SPIF_FFN_UP) {
+        spif_executor->make_anchor(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_MUL_MAT_SPARSE, nullptr);
+    } else if (spif_wt == SPIF_FFN_DOWN) {
+        spif_executor->make_anchor(SingleThreadExecutor::SparkinferWaitType::SPIF_WAIT_AXPY_SPARSE,
+                                   (float *) spif_lc->dfr_decay_pack->data);
+    }
+    GGML_UNUSED(ctx);
+}
+
 static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
     // why is this here instead of mul_mat?
     if (dst->src[0] != nullptr && ggml_backend_buft_is_cuda_split(dst->src[0]->buffer->buft)) {
@@ -2535,6 +2763,15 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_DIV:
             ggml_cuda_op_div(ctx, dst);
+            break;
+        case GGML_OP_SCALE_ADD:
+            ggml_cuda_op_scale_add(ctx, dst);
+            break;
+        case GGML_OP_XOR:
+            ggml_cuda_op_xor(ctx, dst);
+            break;
+        case GGML_OP_AND:
+            ggml_cuda_op_and(ctx, dst);
             break;
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(dst)) {
@@ -2662,6 +2899,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_LEAKY_RELU:
             ggml_cuda_op_leaky_relu(ctx, dst);
             break;
+        case GGML_OP_FATRELU:
+            ggml_cuda_op_fatrelu(ctx, dst);
+            break;
+        case GGML_OP_SHIFTED_STEP:
+            ggml_cuda_op_shifted_step(ctx, dst);
+            break;
         case GGML_OP_SILU_BACK:
             ggml_cuda_op_silu_back(ctx, dst);
             break;
@@ -2676,6 +2919,18 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_MUL_MAT_ID:
             ggml_cuda_mul_mat_id(ctx, dst);
+            break;
+        case GGML_OP_MUL_MAT_SPARSE:
+            ggml_cuda_mul_mat_sparse(ctx, dst->src[0], dst->src[1], dst);
+            break;
+        case GGML_OP_AXPY_SPARSE:
+            ggml_cuda_axpy_sparse(ctx, dst->src[0], dst->src[1], dst);
+            break;
+        case GGML_OP_RELOAD_PLAN:
+            ggml_cuda_reload_plan(ctx, dst);
+            break;
+        case GGML_OP_RELOAD_EXEC:
+            ggml_cuda_reload_exec(ctx, dst);
             break;
         case GGML_OP_OUT_PROD:
             ggml_cuda_out_prod(ctx, dst);
@@ -2757,6 +3012,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_SUM_ROWS:
             ggml_cuda_op_sum_rows(ctx, dst);
+            break;
+        case GGML_OP_SUM_COLS:
+            ggml_cuda_op_sum_cols(ctx, dst);
             break;
         case GGML_OP_MEAN:
             ggml_cuda_op_mean(ctx, dst);
@@ -3659,7 +3917,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
 
 #ifdef GGML_CUDA_DEBUG
                 const int nodes_fused = i - prev_i - 1;
-                if (nodes_fused > 0) {
+                if (nodes_fused > 0 && false) {
                     GGML_LOG_INFO("nodes_fused: %d\n", nodes_fused);
                 }
 #endif
@@ -3983,12 +4241,30 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
 
                     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD}, {})) {
                         ggml_cuda_op_rms_norm_fused_add(*cuda_ctx, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+                        for (int j = 0; j <= 2; ++j) {
+                            if (auto * spif_extra = (sparkinfer_tensor_extra *) cgraph->nodes[i + j]->extra; spif_extra) {
+                                for (int k = 0; k < spif_extra->event_count; ++k) {
+                                    if (spif_extra->states[k] == SPIF_EVENT_RECORD) {
+                                        CUDA_CHECK(cudaEventRecord((cudaEvent_t) spif_extra->events[k]->context, cuda_ctx->stream()));
+                                    }
+                                }
+                            }
+                        }
                         i += 2;
                         continue;
                     }
 
                     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL}, {})) {
                         ggml_cuda_op_rms_norm_fused(*cuda_ctx, node, cgraph->nodes[i+1]);
+                        for (int j = 0; j <= 1; ++j) {
+                            if (auto * spif_extra = (sparkinfer_tensor_extra *) cgraph->nodes[i + j]->extra; spif_extra) {
+                                for (int k = 0; k < spif_extra->event_count; ++k) {
+                                    if (spif_extra->states[k] == SPIF_EVENT_RECORD) {
+                                        CUDA_CHECK(cudaEventRecord((cudaEvent_t) spif_extra->events[k]->context, cuda_ctx->stream()));
+                                    }
+                                }
+                            }
+                        }
                         i++;
                         continue;
                     }
@@ -4026,7 +4302,13 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 GGML_UNUSED(integrated);
 #endif  // NDEBUG
 
+#ifdef USE_NVTX
+                auto id = nvtx_init(-1, node->name, "CUDA");
                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
+                nvtxRangeEnd(id);
+#else
+                bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
+#endif
                 if (!ok) {
                     GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
                 }
@@ -4034,7 +4316,16 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
 
                 if (!is_concurrent_event_active) {
                     try_launch_concurrent_event(node);
-               }
+                }
+
+                // record here (and above in kernel fusion) when use SPIF_PARALLEL in sparkinfer
+                if (auto * spif_extra = (sparkinfer_tensor_extra *) node->extra; spif_extra) {
+                    for (int k = 0; k < spif_extra->event_count; ++k) {
+                        if (spif_extra->states[k] == SPIF_EVENT_RECORD) {
+                            CUDA_CHECK(cudaEventRecord((cudaEvent_t) spif_extra->events[k]->context, cuda_ctx->stream()));
+                        }
+                    }
+                }
             }
         }
 
@@ -4739,6 +5030,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             break;
         case GGML_OP_MUL_MAT:
         case GGML_OP_MUL_MAT_ID:
+        case GGML_OP_MUL_MAT_SPARSE:
+        case GGML_OP_AXPY_SPARSE:
             {
                 struct ggml_tensor * a = op->src[0];
                 struct ggml_tensor * b = op->src[1];
@@ -4802,6 +5095,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                         return false;
                 }
             } break;
+        case GGML_OP_RELOAD_PLAN:
+        case GGML_OP_RELOAD_EXEC:
+            return true;
         case GGML_OP_OUT_PROD:
             return op->type == GGML_TYPE_F32 && op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
         case GGML_OP_GET_ROWS:
@@ -4948,6 +5244,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_SUB:
         case GGML_OP_MUL:
         case GGML_OP_DIV:
+        case GGML_OP_SCALE_ADD:
+        case GGML_OP_XOR:
+        case GGML_OP_AND:
         case GGML_OP_SCALE:
         case GGML_OP_SQR:
         case GGML_OP_SQRT:
@@ -5012,6 +5311,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return true;
 #endif
         case GGML_OP_SUM_ROWS:
+        case GGML_OP_SUM_COLS:
         case GGML_OP_MEAN:
         case GGML_OP_GROUP_NORM:
             return ggml_is_contiguous(op->src[0]);
@@ -5022,6 +5322,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_ARANGE:
         case GGML_OP_TIMESTEP_EMBEDDING:
         case GGML_OP_LEAKY_RELU:
+        case GGML_OP_FATRELU:
+        case GGML_OP_SHIFTED_STEP:
         case GGML_OP_RWKV_WKV6:
         case GGML_OP_GATED_LINEAR_ATTN:
         case GGML_OP_RWKV_WKV7:
@@ -5062,6 +5364,8 @@ static int64_t get_op_batch_size(const ggml_tensor * op) {
         case GGML_OP_GET_ROWS:
             return 0;
         case GGML_OP_MUL_MAT:
+        case GGML_OP_MUL_MAT_SPARSE:
+        case GGML_OP_AXPY_SPARSE:
             return op->ne[1];
         case GGML_OP_MUL_MAT_ID:
         case GGML_OP_ROPE:

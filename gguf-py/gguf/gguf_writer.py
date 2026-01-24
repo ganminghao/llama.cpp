@@ -1254,6 +1254,9 @@ class GGUFWriter:
     def add_xielu_eps(self, values: Sequence[float]):
         self.add_array(Keys.xIELU.EPS, values)
 
+    def add_predictor_low_ranks(self, values: Sequence[int]):
+        self.add_array(Keys.Predictor.LOW_RANKS, values)
+
     # diffusion models
 
     def add_diffusion_shift_logits(self, value: bool) -> None:

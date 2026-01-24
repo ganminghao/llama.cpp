@@ -80,13 +80,24 @@ llm_build_falcon::llm_build_falcon(const llama_model & model, const llm_graph_pa
         ggml_tensor * ffn_inp = cur;
 
         // feed forward
-        {
+        if (spif_cm != nullptr) {
+            cur = build_sparse_ffn(attn_norm, inp_out_ids, &model, il); // !! use the attn norm, not the result
+        } else {
+            ggml_tensor * model_layer_il_ffn_down = model.layers[il].ffn_down;
+            if (model.params.use_sparkinfer) {
+                model_layer_il_ffn_down = ggml_reshape_2d(ctx0, model.layers[il].ffn_down_t,
+                                            model.layers[il].ffn_down_t->ne[1], model.layers[il].ffn_down_t->ne[0]);
+            }
+            llm_ffn_op_type ffn_op_type = LLM_FFN_GELU;
+            if (arch == LLM_ARCH_RELUFALCON) {
+                ffn_op_type = LLM_FFN_RELU;
+            }
             cur = build_ffn(attn_norm, // !! use the attn norm, not the result
-                    model.layers[il].ffn_up,   NULL, NULL,
-                    NULL,                      NULL, NULL,
-                    model.layers[il].ffn_down, NULL, NULL,
+                    model.layers[il].ffn_up, NULL, NULL,
+                    NULL,                    NULL, NULL,
+                    model_layer_il_ffn_down, NULL, NULL,
                     NULL,
-                    LLM_FFN_GELU, LLM_FFN_SEQ, il);
+                    ffn_op_type, LLM_FFN_SEQ, il);
             cb(cur, "ffn_out", il);
         }
 
