@@ -2582,69 +2582,34 @@ static void ggml_cuda_reload_plan(ggml_backend_cuda_context & ctx, ggml_tensor *
     CUDA_CHECK(cudaStreamSynchronize(main_stream));
 }
 
-struct sparkinfer_batch_reload_args {
-    void **              srcs      = nullptr;
-    void **              dsts      = nullptr;
-    size_t *             sizes     = nullptr;
-    size_t               count     = 0;
-    cudaStream_t         stream    = nullptr;
-    cudaMemcpyAttributes attrs     = {};
-    size_t               attrsIdxs = 0;
-    const char *         op_name   = nullptr;
-    int                  op_flag   = 0;
-};
-
-static inline sparkinfer_batch_reload_args * sparkinfer_make_batch_reload_args(char *       weight_base,
-                                                                               char *       cache_base,
-                                                                               size_t       nbytes,
-                                                                               cudaStream_t stream,
-                                                                               size_t       window_offset,
-                                                                               size_t       window_size,
-                                                                               copy_pair *  reload_plan,
-                                                                               const char * op_name,
-                                                                               int          op_flag) {
-    auto * args   = new sparkinfer_batch_reload_args;
-    args->count   = window_size;
-    args->stream  = stream;
-    args->op_name = op_name;
-    args->op_flag = op_flag;
-    args->srcs    = (void **) malloc(window_size * sizeof(void *));
-    args->dsts    = (void **) malloc(window_size * sizeof(void *));
-    args->sizes   = (size_t *) malloc(window_size * sizeof(size_t));
-    for (size_t i = 0; i < window_size; ++i) {
-        const auto & p = reload_plan[window_offset + i];
-        args->srcs[i]  = (void *) (weight_base + p.weight_idx * nbytes);
-        args->dsts[i]  = (void *) (cache_base + p.cache_idx * nbytes);
-        args->sizes[i] = nbytes;
-    }
-    args->attrs                = {};
-    args->attrs.srcAccessOrder = cudaMemcpySrcAccessOrderAny;
-    args->attrs.flags          = cudaMemcpyFlagPreferOverlapWithCompute;
-    args->attrsIdxs            = 0;
-    return args;
-}
-
-static void sparkinfer_batch_reload(sparkinfer_batch_reload_args * args) {
+static void sparkinfer_batch_reload(char *       weight_base,
+                                    char *       cache_base,
+                                    size_t       nbytes,
+                                    cudaStream_t stream,
+                                    size_t       window_offset,
+                                    size_t       window_size,
+                                    copy_pair *  reload_plan,
+                                    const char * op_name,
+                                    int          op_flag) {
 #ifdef USE_NVTX
     static thread_local nvtxRangeId_t id = 0;
-    if ((args->op_flag & 1) && id == 0) {
-        id = nvtx_init(-2, args->op_name, "CUDA");
+    if ((op_flag & 1) && id == 0) {
+        id = nvtx_init(-2, op_name, "CUDA");
     }
 #else
-    GGML_UNUSED(args->op_name);
-    GGML_UNUSED(args->op_flag);
+    GGML_UNUSED_VARS(op_name, op_flag);
 #endif
 
-    CUDA_CHECK(cudaMemcpyBatchAsync(args->dsts, args->srcs, args->sizes, args->count, &args->attrs, &args->attrsIdxs, 1,
-                                    nullptr, args->stream));
-    CUDA_CHECK(cudaStreamSynchronize(args->stream));
-    free(args->srcs);
-    free(args->dsts);
-    free(args->sizes);
-    delete args;
+    for (size_t i = 0; i < window_size; ++i) {
+        const auto & p   = reload_plan[window_offset + i];
+        void *       dst = (void *) (cache_base + p.cache_idx * nbytes);
+        void *       src = (void *) (weight_base + p.weight_idx * nbytes);
+        CUDA_CHECK(cudaMemcpyAsync(dst, src, nbytes, cudaMemcpyHostToDevice, stream));
+    }
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
 #ifdef USE_NVTX
-    if ((args->op_flag & 2) && id != 0) {
+    if ((op_flag & 2) && id != 0) {
         nvtxRangeEnd(id);
         id = 0;
     }
@@ -2657,41 +2622,47 @@ static void ggml_cuda_reload_exec(ggml_backend_cuda_context & ctx, ggml_tensor *
     memcpy((void *) &obj, &(dst->op_params[1]), sizeof(void *));
     auto * spif_lc = (sparkinfer_layer_cache *) obj;
 
-    // clang-format off
-    char * weight_base = nullptr;
-    char * cache_base  = nullptr;
+    size_t group_nbytes = 0;
+    char * weight_base  = nullptr;
+    char * cache_base   = nullptr;
     switch (spif_wt) {
-        case SPIF_FFN_UP: {
-            weight_base = (char *) spif_lc->ffn_up->data;
-            cache_base  = (char *) spif_lc->ffn_up_cache->data;
-            } break;
-        case SPIF_FFN_GATE: {
-            weight_base = (char *) spif_lc->ffn_gate->data;
-            cache_base  = (char *) spif_lc->ffn_gate_cache->data;
-            } break;
-        case SPIF_FFN_DOWN: {
-            weight_base = (char *) spif_lc->ffn_down->data;
-            cache_base  = (char *) spif_lc->ffn_down_cache->data;
-            } break;
+        case SPIF_FFN_UP:
+            {
+                group_nbytes = spif_lc->layer_cm.g * ggml_row_size(spif_lc->ffn_up->type, spif_lc->ffn_up->ne[0]);
+                weight_base  = (char *) spif_lc->ffn_up->data;
+                cache_base   = (char *) spif_lc->ffn_up_cache->data;
+            }
+            break;
+        case SPIF_FFN_GATE:
+            {
+                group_nbytes = spif_lc->layer_cm.g * ggml_row_size(spif_lc->ffn_gate->type, spif_lc->ffn_gate->ne[0]);
+                weight_base  = (char *) spif_lc->ffn_gate->data;
+                cache_base   = (char *) spif_lc->ffn_gate_cache->data;
+            }
+            break;
+        case SPIF_FFN_DOWN:
+            {
+                group_nbytes = spif_lc->layer_cm.g * ggml_row_size(spif_lc->ffn_down->type, spif_lc->ffn_down->ne[0]);
+                weight_base  = (char *) spif_lc->ffn_down->data;
+                cache_base   = (char *) spif_lc->ffn_down_cache->data;
+            }
+            break;
     };
-    // clang-format on
 
-    auto *       spif_extra    = (sparkinfer_tensor_extra *) dst->extra;
-    auto *       spif_executor = (SingleThreadExecutor *) spif_extra->spif_executor;
-    const size_t grp_nbytes    = spif_lc->layer_cm.g * ggml_row_size(spif_lc->ffn_up->type, spif_lc->ffn_up->ne[0]);
+    auto * spif_extra    = (sparkinfer_tensor_extra *) dst->extra;
+    auto * spif_executor = (SingleThreadExecutor *) spif_extra->spif_executor;
     for (size_t window_offset = 0; window_offset < spif_lc->reload_count;) {
         size_t window_size = MIN(spif_lc->reload_window_size, spif_lc->reload_count - window_offset);
 
         int op_flag = 0;
         if (window_offset == 0) {
             op_flag |= 1;
-        } else if (window_offset + window_size >= spif_lc->reload_count) {
+        }
+        if (window_offset + window_size >= spif_lc->reload_count) {
             op_flag |= 2;
         }
-        spif_executor->post(
-            sparkinfer_batch_reload,
-            sparkinfer_make_batch_reload_args(weight_base, cache_base, grp_nbytes, cudaStreamPerThread, window_offset,
-                                              window_size, spif_lc->reload_plan, dst->name, op_flag));
+        spif_executor->post(sparkinfer_batch_reload, weight_base, cache_base, group_nbytes, cudaStreamPerThread,
+                            window_offset, window_size, spif_lc->reload_plan, dst->name, op_flag);
 
         window_offset += window_size;
     }
