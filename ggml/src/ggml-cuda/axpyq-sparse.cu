@@ -6,6 +6,9 @@
 
 #define Q8_BLOCK_SIZE 34
 #define Q8_NUM_B      32
+#define Q4_K_BLOCK_SIZE 144
+#define Q4_K_NUM_B      QK_K
+#define Q6_K_NUM_B      QK_K
 #define TILE_TOKENS   4  // we process 4 tokens per block
 #define TILE_COLS     4  // we divide ncols into 8 tiles
 
@@ -17,6 +20,16 @@ static __device__ inline float fp16_to_fp32_device(uint16_t h) {
 
     tmp.u = h;
     return __half2float(tmp.h);
+}
+
+static __device__ __forceinline__ void get_scale_min_k4_device(int j, const uint8_t * q, uint8_t * d, uint8_t * m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4);
+    }
 }
 
 static __global__ void mul_mat_axpy_sparse_rowwise_q(const void * __restrict__ vx,
@@ -100,16 +113,166 @@ static __global__ void mul_mat_axpy_sparse_rowwise_q(const void * __restrict__ v
     }
 }
 
-static void launch_mul_mat_axpy_cuda_sparse_rowwise(const char *    x,
-                                                    const float *   y,
-                                                    const float *   sparse_idx,
-                                                    const int32_t * gpu_neu_idx,
-                                                    float *         dst,
-                                                    const int64_t   ncols,
-                                                    const int64_t   nrows,
-                                                    const int64_t   src_ncols,
-                                                    const int64_t   num_gpu_neurons,
-                                                    cudaStream_t    stream) {
+static __device__ __forceinline__ float dequantize_q4_k_at(const block_q4_K * block, const int idx_in_block) {
+    const int group_idx     = idx_in_block / 32;
+    const int pos_in_group  = idx_in_block - group_idx * 32;
+    const int group_pair    = group_idx / 2;
+    const int byte_idx      = group_pair * 32 + pos_in_group;
+    const int qv            = (group_idx % 2 == 0) ? (block->qs[byte_idx] & 0x0F) : (block->qs[byte_idx] >> 4);
+
+    uint8_t sc;
+    uint8_t minv;
+    get_scale_min_k4_device(group_idx, block->scales, &sc, &minv);
+
+    const float d_all    = __half2float(__low2half(block->dm));
+    const float dmin_all = __half2float(__high2half(block->dm));
+    return d_all * sc * (float) qv - dmin_all * minv;
+}
+
+static __device__ __forceinline__ float dequantize_q6_k_at(const block_q6_K * block, const int idx_in_block) {
+    const int ip     = idx_in_block / 128;
+    const int offset = idx_in_block - ip * 128;
+    const int l      = offset & 31;
+    const int is     = l / 16;
+
+    const uint8_t qh = block->qh[32 * ip + l];
+    int q;
+    int scale_idx;
+
+    if (offset < 32) {
+        q = (int) ((block->ql[64 * ip + l] & 0x0F) | (((qh >> 0) & 0x03) << 4)) - 32;
+        scale_idx = 8 * ip + is + 0;
+    } else if (offset < 64) {
+        q = (int) ((block->ql[64 * ip + 32 + l] & 0x0F) | (((qh >> 2) & 0x03) << 4)) - 32;
+        scale_idx = 8 * ip + is + 2;
+    } else if (offset < 96) {
+        q = (int) ((block->ql[64 * ip + l] >> 4) | (((qh >> 4) & 0x03) << 4)) - 32;
+        scale_idx = 8 * ip + is + 4;
+    } else {
+        q = (int) ((block->ql[64 * ip + 32 + l] >> 4) | (((qh >> 6) & 0x03) << 4)) - 32;
+        scale_idx = 8 * ip + is + 6;
+    }
+
+    const float d = __half2float(block->d);
+    return d * (float) block->scales[scale_idx] * (float) q;
+}
+
+static __global__ void mul_mat_axpy_sparse_rowwise_q4_k(const block_q4_K * __restrict__ vx,
+                                                         const float * __restrict__ y,
+                                                         float * __restrict__ dst,
+                                                         const int       ncols,
+                                                         const int       nrows,
+                                                         const int       qblock_num,
+                                                         const int       block_len,
+                                                         const int       src_ncols,
+                                                         const int32_t * gpu_neu_idx,
+                                                         const float *   sparse_idx) {
+    GGML_UNUSED(block_len);
+
+    const int blk_idx      = blockIdx.x;
+    const int token_ty     = threadIdx.y;
+    const int thds_per_blk = blockDim.x;
+    const int tid          = threadIdx.x;
+
+    const int token_idx = blockIdx.y * blockDim.y + token_ty;
+    if (token_idx >= src_ncols) {
+        return;
+    }
+
+    const float * y_tok      = y + token_idx * nrows;
+    float *       dst_tok    = dst + token_idx * ncols;
+    const float * sparse_tok = sparse_idx + token_idx * nrows;
+
+    const int neu = gpu_neu_idx ? gpu_neu_idx[blk_idx] : blk_idx;
+
+    const float alpha_fp32 = y_tok[neu];
+    if (sparse_tok[neu] < 0.5f || alpha_fp32 == 0.0f) {
+        return;
+    }
+
+    const int tile_id     = blockIdx.z;
+    const int block_start = tile_id * block_len;
+    const int block_end   = min(block_start + block_len, qblock_num);
+    const int tile_blocks = max(block_end - block_start, 0);
+    const int col_start   = block_start * Q4_K_NUM_B;
+    const int col_end     = min(col_start + tile_blocks * Q4_K_NUM_B, ncols);
+    if (col_start >= col_end) {
+        return;
+    }
+
+    const block_q4_K * row_blocks = vx + (int64_t) blk_idx * qblock_num;
+
+    for (int col = col_start + tid; col < col_end; col += thds_per_blk) {
+        const int block_idx_col = col / Q4_K_NUM_B;
+        const int idx_in_block  = col - block_idx_col * Q4_K_NUM_B;
+        const float w           = dequantize_q4_k_at(&row_blocks[block_idx_col], idx_in_block);
+        atomicAdd(&dst_tok[col], w * alpha_fp32);
+    }
+}
+
+static __global__ void mul_mat_axpy_sparse_rowwise_q6_k(const block_q6_K * __restrict__ vx,
+                                                         const float * __restrict__ y,
+                                                         float * __restrict__ dst,
+                                                         const int       ncols,
+                                                         const int       nrows,
+                                                         const int       qblock_num,
+                                                         const int       block_len,
+                                                         const int       src_ncols,
+                                                         const int32_t * gpu_neu_idx,
+                                                         const float *   sparse_idx) {
+    GGML_UNUSED(block_len);
+
+    const int blk_idx      = blockIdx.x;
+    const int token_ty     = threadIdx.y;
+    const int thds_per_blk = blockDim.x;
+    const int tid          = threadIdx.x;
+
+    const int token_idx = blockIdx.y * blockDim.y + token_ty;
+    if (token_idx >= src_ncols) {
+        return;
+    }
+
+    const float * y_tok      = y + token_idx * nrows;
+    float *       dst_tok    = dst + token_idx * ncols;
+    const float * sparse_tok = sparse_idx + token_idx * nrows;
+
+    const int neu = gpu_neu_idx ? gpu_neu_idx[blk_idx] : blk_idx;
+
+    const float alpha_fp32 = y_tok[neu];
+    if (sparse_tok[neu] < 0.5f || alpha_fp32 == 0.0f) {
+        return;
+    }
+
+    const int tile_id     = blockIdx.z;
+    const int block_start = tile_id * block_len;
+    const int block_end   = min(block_start + block_len, qblock_num);
+    const int tile_blocks = max(block_end - block_start, 0);
+    const int col_start   = block_start * Q6_K_NUM_B;
+    const int col_end     = min(col_start + tile_blocks * Q6_K_NUM_B, ncols);
+    if (col_start >= col_end) {
+        return;
+    }
+
+    const block_q6_K * row_blocks = vx + (int64_t) blk_idx * qblock_num;
+
+    for (int col = col_start + tid; col < col_end; col += thds_per_blk) {
+        const int block_idx_col = col / Q6_K_NUM_B;
+        const int idx_in_block  = col - block_idx_col * Q6_K_NUM_B;
+        const float w           = dequantize_q6_k_at(&row_blocks[block_idx_col], idx_in_block);
+        atomicAdd(&dst_tok[col], w * alpha_fp32);
+    }
+}
+
+static void launch_mul_mat_axpy_cuda_sparse_rowwise_q8_0(const char *    x,
+                                                          const float *   y,
+                                                          const float *   sparse_idx,
+                                                          const int32_t * gpu_neu_idx,
+                                                          float *         dst,
+                                                          const int64_t   ncols,
+                                                          const int64_t   nrows,
+                                                          const int64_t   src_ncols,
+                                                          const int64_t   num_gpu_neurons,
+                                                          cudaStream_t    stream) {
     dim3      block_nums;
     dim3      block_dims;
     size_t    share_mem_size = 0;
@@ -125,6 +288,60 @@ static void launch_mul_mat_axpy_cuda_sparse_rowwise(const char *    x,
         share_mem_size = block_len * Q8_NUM_B * TILE_TOKENS * sizeof(float);
     }
     mul_mat_axpy_sparse_rowwise_q<<<block_nums, block_dims, share_mem_size, stream>>>(
+        x, y, dst, ncols, nrows, qblock_num, block_len, src_ncols, gpu_neu_idx, sparse_idx);
+}
+
+static void launch_mul_mat_axpy_cuda_sparse_rowwise_q4_k(const block_q4_K * x,
+                                                          const float *      y,
+                                                          const float *      sparse_idx,
+                                                          const int32_t *    gpu_neu_idx,
+                                                          float *            dst,
+                                                          const int64_t      ncols,
+                                                          const int64_t      nrows,
+                                                          const int64_t      src_ncols,
+                                                          const int64_t      num_gpu_neurons,
+                                                          cudaStream_t       stream) {
+    dim3 block_nums;
+    dim3 block_dims;
+    const int qblock_num = ncols / Q4_K_NUM_B + (ncols % Q4_K_NUM_B != 0 ? 1 : 0);
+    const int block_len  = (qblock_num + TILE_COLS - 1) / TILE_COLS;
+
+    if (src_ncols == 1) {
+        block_nums = dim3(num_gpu_neurons, 1, TILE_COLS);
+        block_dims = dim3(WARP_SIZE, 1, 1);
+    } else {
+        block_nums = dim3(num_gpu_neurons, (src_ncols + TILE_TOKENS - 1) / TILE_TOKENS, TILE_COLS);
+        block_dims = dim3(WARP_SIZE, TILE_TOKENS, 1);
+    }
+
+    mul_mat_axpy_sparse_rowwise_q4_k<<<block_nums, block_dims, 0, stream>>>(
+        x, y, dst, ncols, nrows, qblock_num, block_len, src_ncols, gpu_neu_idx, sparse_idx);
+}
+
+static void launch_mul_mat_axpy_cuda_sparse_rowwise_q6_k(const block_q6_K * x,
+                                                          const float *      y,
+                                                          const float *      sparse_idx,
+                                                          const int32_t *    gpu_neu_idx,
+                                                          float *            dst,
+                                                          const int64_t      ncols,
+                                                          const int64_t      nrows,
+                                                          const int64_t      src_ncols,
+                                                          const int64_t      num_gpu_neurons,
+                                                          cudaStream_t       stream) {
+    dim3 block_nums;
+    dim3 block_dims;
+    const int qblock_num = ncols / Q6_K_NUM_B + (ncols % Q6_K_NUM_B != 0 ? 1 : 0);
+    const int block_len  = (qblock_num + TILE_COLS - 1) / TILE_COLS;
+
+    if (src_ncols == 1) {
+        block_nums = dim3(num_gpu_neurons, 1, TILE_COLS);
+        block_dims = dim3(WARP_SIZE, 1, 1);
+    } else {
+        block_nums = dim3(num_gpu_neurons, (src_ncols + TILE_TOKENS - 1) / TILE_TOKENS, TILE_COLS);
+        block_dims = dim3(WARP_SIZE, TILE_TOKENS, 1);
+    }
+
+    mul_mat_axpy_sparse_rowwise_q6_k<<<block_nums, block_dims, 0, stream>>>(
         x, y, dst, ncols, nrows, qblock_num, block_len, src_ncols, gpu_neu_idx, sparse_idx);
 }
 
@@ -163,10 +380,16 @@ void ggml_cuda_op_axpy_sparse_q(ggml_backend_cuda_context & ctx,
 
     switch (src0->type) {
         case GGML_TYPE_Q8_0:
-            {
-                launch_mul_mat_axpy_cuda_sparse_rowwise(src0_dd_i, src1_ddf_i, sparse_idx, gpu_neu_idx, dst_dd_i, ncols,
-                                                        nrows, dst->ne[1], num_gpu_neurons, stream);
-            }
+            launch_mul_mat_axpy_cuda_sparse_rowwise_q8_0(src0_dd_i, src1_ddf_i, sparse_idx, gpu_neu_idx, dst_dd_i, ncols,
+                                                         nrows, src1_ncols, num_gpu_neurons, stream);
+            break;
+        case GGML_TYPE_Q4_K:
+            launch_mul_mat_axpy_cuda_sparse_rowwise_q4_k((const block_q4_K *) src0_dd_i, src1_ddf_i, sparse_idx, gpu_neu_idx,
+                                                         dst_dd_i, ncols, nrows, src1_ncols, num_gpu_neurons, stream);
+            break;
+        case GGML_TYPE_Q6_K:
+            launch_mul_mat_axpy_cuda_sparse_rowwise_q6_k((const block_q6_K *) src0_dd_i, src1_ddf_i, sparse_idx, gpu_neu_idx,
+                                                         dst_dd_i, ncols, nrows, src1_ncols, num_gpu_neurons, stream);
             break;
         default:
             GGML_ABORT("unsupported type: %s", ggml_type_name(src0->type));

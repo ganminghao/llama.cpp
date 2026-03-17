@@ -2,6 +2,7 @@
 #include "ggml.h"
 #include "mmq-sparse.cuh"
 #include "quantize.cuh"
+#include "vecdotq.cuh"
 
 #include <stdint.h>
 
@@ -26,6 +27,18 @@ static __device__ __forceinline__ float dot_block_q8_0_q8_1_dp4a(const block_q8_
     const float d1 = __half2float(__low2half(by.ds));
 
     return d0 * d1 * (float) sumi;
+}
+
+static __device__ __forceinline__ float dot_block_q4_k_q8_1(const block_q4_K & bx, const block_q8_1 * by) {
+    float sumf = 0.0f;
+    int   kbx  = 0;
+
+#pragma unroll
+    for (int iqs = 0; iqs < QI4_K; iqs += VDR_Q4_K_Q8_1_MMVQ) {
+        sumf += vec_dot_q4_K_q8_1((const void *) &bx, by, kbx, iqs);
+    }
+
+    return sumf;
 }
 
 template <int block_size>
@@ -158,24 +171,156 @@ static __global__ void mul_mat_batch_sparse_q8_0_q8_1(
     }
 }
 
+template <int block_size>
+static __global__ void mul_mat_vec_sparse_q4_K_q8_1(const block_q4_K * __restrict__ w_q4_k,    // [nrows * num_blocks]
+                                                    const block_q8_1 * __restrict__ x_q8,       // [num_blocks * q8_per_block]
+                                                    const float * __restrict__ sparse_col,       // [nrows]
+                                                    const int32_t * __restrict__ gpu_neu_idx,    // [num_gpu_neurons]
+                                                    float * __restrict__ dst_col,                // [nrows]
+                                                    const int64_t nrows,
+                                                    const int64_t num_gpu_neurons,
+                                                    const int64_t num_blocks,
+                                                    const int64_t q8_per_block) {
+    const int row_block = blockIdx.x;
+    const int tid       = threadIdx.x;
+
+    if (row_block >= num_gpu_neurons) {
+        return;
+    }
+
+    const int32_t neu = gpu_neu_idx ? gpu_neu_idx[row_block] : row_block;
+    if (neu >= nrows) {
+        return;
+    }
+
+    if (sparse_col[neu] < 0.5f) {
+        return;
+    }
+
+    const block_q4_K * row_w = w_q4_k + (int64_t) row_block * num_blocks;
+
+    extern __shared__ float smem[];
+    float *                 buf = smem;
+
+    float sumf = 0.0f;
+
+    for (int64_t ib = tid; ib < num_blocks; ib += block_size) {
+        sumf += dot_block_q4_k_q8_1(row_w[ib], x_q8 + ib * q8_per_block);
+    }
+
+    sumf = warp_reduce_sum<WARP_SIZE>(sumf);
+
+    if (block_size > WARP_SIZE) {
+        if (tid % WARP_SIZE == 0) {
+            buf[tid / WARP_SIZE] = sumf;
+        }
+        __syncthreads();
+
+        if (tid >= WARP_SIZE) {
+            return;
+        }
+
+        sumf = (tid < block_size / WARP_SIZE) ? buf[tid] : 0.0f;
+        sumf = warp_reduce_sum<WARP_SIZE>(sumf);
+    }
+
+    if (tid == 0) {
+        dst_col[neu] = sumf;
+    }
+}
+
+template <int block_size>
+static __global__ void mul_mat_batch_sparse_q4_K_q8_1(
+    const block_q4_K * __restrict__ w_q4_k,    // [nrows * num_blocks]
+    const block_q8_1 * __restrict__ x_q8,      // [src1_ncols * num_blocks * q8_per_block]
+    const float * __restrict__ sparse_idx,     // [src1_ncols * nrows]
+    const int32_t * __restrict__ gpu_neu_idx,  // [num_gpu_neurons]
+    float * __restrict__ dst,                  // [src1_ncols * nrows]
+    const int64_t ncols,                       // K
+    const int64_t nrows,                       // M
+    const int64_t src1_ncols,                  // N
+    const int64_t num_gpu_neurons,
+    const int64_t q8_per_block) {
+    const int64_t num_blocks = ncols / QK_K;
+
+    const int64_t row_block = blockIdx.x;
+    const int64_t col       = blockIdx.y;
+    const int     tid       = threadIdx.x;
+
+    if (row_block >= num_gpu_neurons || col >= src1_ncols) {
+        return;
+    }
+
+    const int32_t neu = gpu_neu_idx ? gpu_neu_idx[row_block] : row_block;
+    if (neu >= nrows) {
+        return;
+    }
+
+    const block_q4_K * row_w      = w_q4_k + (int64_t) row_block * num_blocks;
+    const block_q8_1 * x_col      = x_q8 + (int64_t) col * num_blocks * q8_per_block;
+    float *            dst_col    = dst + (int64_t) col * nrows;
+    const float *      sparse_col = sparse_idx + (int64_t) col * nrows;
+
+    if (sparse_col[neu] < 0.5f) {
+        return;
+    }
+
+    extern __shared__ float smem[];
+    float *                 buf = smem;
+
+    float sumf = 0.0f;
+
+    for (int64_t ib = tid; ib < num_blocks; ib += block_size) {
+        sumf += dot_block_q4_k_q8_1(row_w[ib], x_col + ib * q8_per_block);
+    }
+
+    sumf = warp_reduce_sum<WARP_SIZE>(sumf);
+
+    if (block_size > WARP_SIZE) {
+        if (tid % WARP_SIZE == 0) {
+            buf[tid / WARP_SIZE] = sumf;
+        }
+        __syncthreads();
+
+        if (tid >= WARP_SIZE) {
+            return;
+        }
+
+        sumf = (tid < block_size / WARP_SIZE) ? buf[tid] : 0.0f;
+        sumf = warp_reduce_sum<WARP_SIZE>(sumf);
+    }
+
+    if (tid == 0) {
+        dst_col[neu] = sumf;
+    }
+}
+
 static void launch_mul_mat_cuda_sparse_q(ggml_backend_cuda_context & ctx,
                                          const mmq_sparse_args &     args,
                                          cudaStream_t                stream) {
     GGML_UNUSED(ctx);
-
-    GGML_ASSERT(args.type_x == GGML_TYPE_Q8_0);
 
     const int64_t nrows           = args.nrows_dst;  // M
     const int64_t ncols           = args.ncols_x;    // K
     const int64_t num_gpu_neurons = args.num_gpu_neurons;
     const int64_t src1_ncols      = args.ncols_y;    // N
 
-    GGML_ASSERT(ncols % QK8_0 == 0);
-    const int64_t num_blocks = ncols / QK8_0;
+    const bool is_q8_0 = args.type_x == GGML_TYPE_Q8_0;
+    const bool is_q4_k = args.type_x == GGML_TYPE_Q4_K;
+    GGML_ASSERT(is_q8_0 || is_q4_k);
 
-    const block_q8_0 * w_q8 = (const block_q8_0 *) args.x;
-    const block_q8_1 * x_q8 = (const block_q8_1 *) args.y;
-    float *            dst  = args.dst;
+    const int64_t q8_per_block = is_q4_k ? (QK_K / QK8_1) : 1;
+    if (is_q8_0) {
+        GGML_ASSERT(ncols % QK8_0 == 0);
+    } else {
+        GGML_ASSERT(ncols % QK_K == 0);
+    }
+    const int64_t num_blocks = is_q8_0 ? (ncols / QK8_0) : (ncols / QK_K);
+
+    const block_q8_0 * w_q8   = (const block_q8_0 *) args.x;
+    const block_q4_K * w_q4_k = (const block_q4_K *) args.x;
+    const block_q8_1 * x_q8   = (const block_q8_1 *) args.y;
+    float *            dst    = args.dst;
 
     const float *   sparse_idx  = args.sparse_idx;
     const int32_t * gpu_neu_idx = args.gpu_neu_idx;
@@ -207,37 +352,77 @@ static void launch_mul_mat_cuda_sparse_q(ggml_backend_cuda_context & ctx,
 
         switch (block_size_best) {
             case 32:
-                mul_mat_vec_sparse_q8_0_q8_1<32><<<grid, 32, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                             nrows, num_gpu_neurons, num_blocks);
+                if (is_q8_0) {
+                    mul_mat_vec_sparse_q8_0_q8_1<32><<<grid, 32, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 nrows, num_gpu_neurons, num_blocks);
+                } else {
+                    mul_mat_vec_sparse_q4_K_q8_1<32><<<grid, 32, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 nrows, num_gpu_neurons, num_blocks, q8_per_block);
+                }
                 break;
             case 64:
-                mul_mat_vec_sparse_q8_0_q8_1<64><<<grid, 64, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                             nrows, num_gpu_neurons, num_blocks);
+                if (is_q8_0) {
+                    mul_mat_vec_sparse_q8_0_q8_1<64><<<grid, 64, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 nrows, num_gpu_neurons, num_blocks);
+                } else {
+                    mul_mat_vec_sparse_q4_K_q8_1<64><<<grid, 64, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 nrows, num_gpu_neurons, num_blocks, q8_per_block);
+                }
                 break;
             case 96:
-                mul_mat_vec_sparse_q8_0_q8_1<96><<<grid, 96, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                             nrows, num_gpu_neurons, num_blocks);
+                if (is_q8_0) {
+                    mul_mat_vec_sparse_q8_0_q8_1<96><<<grid, 96, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 nrows, num_gpu_neurons, num_blocks);
+                } else {
+                    mul_mat_vec_sparse_q4_K_q8_1<96><<<grid, 96, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 nrows, num_gpu_neurons, num_blocks, q8_per_block);
+                }
                 break;
             case 128:
-                mul_mat_vec_sparse_q8_0_q8_1<128><<<grid, 128, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                               nrows, num_gpu_neurons, num_blocks);
+                if (is_q8_0) {
+                    mul_mat_vec_sparse_q8_0_q8_1<128><<<grid, 128, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks);
+                } else {
+                    mul_mat_vec_sparse_q4_K_q8_1<128><<<grid, 128, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks, q8_per_block);
+                }
                 break;
             case 160:
-                mul_mat_vec_sparse_q8_0_q8_1<160><<<grid, 160, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                               nrows, num_gpu_neurons, num_blocks);
+                if (is_q8_0) {
+                    mul_mat_vec_sparse_q8_0_q8_1<160><<<grid, 160, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks);
+                } else {
+                    mul_mat_vec_sparse_q4_K_q8_1<160><<<grid, 160, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks, q8_per_block);
+                }
                 break;
             case 192:
-                mul_mat_vec_sparse_q8_0_q8_1<192><<<grid, 192, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                               nrows, num_gpu_neurons, num_blocks);
+                if (is_q8_0) {
+                    mul_mat_vec_sparse_q8_0_q8_1<192><<<grid, 192, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks);
+                } else {
+                    mul_mat_vec_sparse_q4_K_q8_1<192><<<grid, 192, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks, q8_per_block);
+                }
                 break;
             case 224:
-                mul_mat_vec_sparse_q8_0_q8_1<224><<<grid, 224, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                               nrows, num_gpu_neurons, num_blocks);
+                if (is_q8_0) {
+                    mul_mat_vec_sparse_q8_0_q8_1<224><<<grid, 224, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks);
+                } else {
+                    mul_mat_vec_sparse_q4_K_q8_1<224><<<grid, 224, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks, q8_per_block);
+                }
                 break;
             case 256:
             default:
-                mul_mat_vec_sparse_q8_0_q8_1<256><<<grid, 256, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                               nrows, num_gpu_neurons, num_blocks);
+                if (is_q8_0) {
+                    mul_mat_vec_sparse_q8_0_q8_1<256><<<grid, 256, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks);
+                } else {
+                    mul_mat_vec_sparse_q4_K_q8_1<256><<<grid, 256, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                   nrows, num_gpu_neurons, num_blocks, q8_per_block);
+                }
                 break;
         }
 
@@ -249,37 +434,77 @@ static void launch_mul_mat_cuda_sparse_q(ggml_backend_cuda_context & ctx,
 
     switch (block_size_best) {
         case 32:
-            mul_mat_batch_sparse_q8_0_q8_1<32><<<grid, 32, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                           ncols, nrows, src1_ncols, num_gpu_neurons);
+            if (is_q8_0) {
+                mul_mat_batch_sparse_q8_0_q8_1<32><<<grid, 32, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                               ncols, nrows, src1_ncols, num_gpu_neurons);
+            } else {
+                mul_mat_batch_sparse_q4_K_q8_1<32><<<grid, 32, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                               ncols, nrows, src1_ncols, num_gpu_neurons, q8_per_block);
+            }
             break;
         case 64:
-            mul_mat_batch_sparse_q8_0_q8_1<64><<<grid, 64, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                           ncols, nrows, src1_ncols, num_gpu_neurons);
+            if (is_q8_0) {
+                mul_mat_batch_sparse_q8_0_q8_1<64><<<grid, 64, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                               ncols, nrows, src1_ncols, num_gpu_neurons);
+            } else {
+                mul_mat_batch_sparse_q4_K_q8_1<64><<<grid, 64, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                               ncols, nrows, src1_ncols, num_gpu_neurons, q8_per_block);
+            }
             break;
         case 96:
-            mul_mat_batch_sparse_q8_0_q8_1<96><<<grid, 96, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                           ncols, nrows, src1_ncols, num_gpu_neurons);
+            if (is_q8_0) {
+                mul_mat_batch_sparse_q8_0_q8_1<96><<<grid, 96, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                               ncols, nrows, src1_ncols, num_gpu_neurons);
+            } else {
+                mul_mat_batch_sparse_q4_K_q8_1<96><<<grid, 96, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                               ncols, nrows, src1_ncols, num_gpu_neurons, q8_per_block);
+            }
             break;
         case 128:
-            mul_mat_batch_sparse_q8_0_q8_1<128><<<grid, 128, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                             ncols, nrows, src1_ncols, num_gpu_neurons);
+            if (is_q8_0) {
+                mul_mat_batch_sparse_q8_0_q8_1<128><<<grid, 128, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons);
+            } else {
+                mul_mat_batch_sparse_q4_K_q8_1<128><<<grid, 128, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons, q8_per_block);
+            }
             break;
         case 160:
-            mul_mat_batch_sparse_q8_0_q8_1<160><<<grid, 160, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                             ncols, nrows, src1_ncols, num_gpu_neurons);
+            if (is_q8_0) {
+                mul_mat_batch_sparse_q8_0_q8_1<160><<<grid, 160, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons);
+            } else {
+                mul_mat_batch_sparse_q4_K_q8_1<160><<<grid, 160, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons, q8_per_block);
+            }
             break;
         case 192:
-            mul_mat_batch_sparse_q8_0_q8_1<192><<<grid, 192, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                             ncols, nrows, src1_ncols, num_gpu_neurons);
+            if (is_q8_0) {
+                mul_mat_batch_sparse_q8_0_q8_1<192><<<grid, 192, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons);
+            } else {
+                mul_mat_batch_sparse_q4_K_q8_1<192><<<grid, 192, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons, q8_per_block);
+            }
             break;
         case 224:
-            mul_mat_batch_sparse_q8_0_q8_1<224><<<grid, 224, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                             ncols, nrows, src1_ncols, num_gpu_neurons);
+            if (is_q8_0) {
+                mul_mat_batch_sparse_q8_0_q8_1<224><<<grid, 224, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons);
+            } else {
+                mul_mat_batch_sparse_q4_K_q8_1<224><<<grid, 224, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons, q8_per_block);
+            }
             break;
         case 256:
         default:
-            mul_mat_batch_sparse_q8_0_q8_1<256><<<grid, 256, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
-                                                                             ncols, nrows, src1_ncols, num_gpu_neurons);
+            if (is_q8_0) {
+                mul_mat_batch_sparse_q8_0_q8_1<256><<<grid, 256, smem, stream>>>(w_q8, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons);
+            } else {
+                mul_mat_batch_sparse_q4_K_q8_1<256><<<grid, 256, smem, stream>>>(w_q4_k, x_q8, sparse_idx, gpu_neu_idx, dst,
+                                                                                 ncols, nrows, src1_ncols, num_gpu_neurons, q8_per_block);
+            }
             break;
     }
 
@@ -287,11 +512,11 @@ static void launch_mul_mat_cuda_sparse_q(ggml_backend_cuda_context & ctx,
 }
 
 void ggml_cuda_mul_mat_sparse_q(ggml_backend_cuda_context & ctx,
-                                const ggml_tensor *         src0,  // Q8_0
+                                const ggml_tensor *         src0,
                                 const ggml_tensor *         src1,  // F32
-                                ggml_tensor *               dst)                 // F32
+                                ggml_tensor *               dst)  // F32
 {
-    GGML_ASSERT(src0->type == GGML_TYPE_Q8_0);
+    GGML_ASSERT(src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_Q4_K);
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
 
@@ -345,7 +570,11 @@ void ggml_cuda_mul_mat_sparse_q(ggml_backend_cuda_context & ctx,
 
         CUDA_CHECK(cudaGetLastError());
     }
-    GGML_ASSERT(ne00 % QK8_0 == 0);
+    if (src0->type == GGML_TYPE_Q8_0) {
+        GGML_ASSERT(ne00 % QK8_0 == 0);
+    } else {
+        GGML_ASSERT(ne00 % QK_K == 0);
+    }
 
     const int64_t src1_ncols      = ne11;             // N
     const int64_t nblocks_per_col = nblocks_per_row;  // = ne10 / QK8_1
@@ -382,6 +611,7 @@ void ggml_cuda_mul_mat_sparse_q(ggml_backend_cuda_context & ctx,
 
     switch (src0->type) {
         case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q4_K:
             launch_mul_mat_cuda_sparse_q(ctx, args, stream);
             break;
         default:

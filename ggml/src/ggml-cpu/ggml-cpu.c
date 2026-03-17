@@ -6,6 +6,7 @@
 #include "traits.h"
 #include "ggml-cpu-impl.h"
 #include "ggml-impl.h"
+#include "ggml-quants.h"
 #include "quants.h"
 #include "ggml-threading.h"
 #include "unary-ops.h"
@@ -2165,6 +2166,105 @@ static void ggml_axpy_avx_q8_0_alphaf32(const int                  n,
     }
 }
 
+static inline void ggml_axpy_f32_alphaf32(const int            n,
+                                          const float *         x,
+                                          float *               y,
+                                          const float           alpha) {
+    int i = 0;
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    const __m512 alpha_v = _mm512_set1_ps(alpha);
+    for (; i + 64 <= n; i += 64) {
+        __m512 x0 = _mm512_loadu_ps(x + i +  0);
+        __m512 x1 = _mm512_loadu_ps(x + i + 16);
+        __m512 x2 = _mm512_loadu_ps(x + i + 32);
+        __m512 x3 = _mm512_loadu_ps(x + i + 48);
+        __m512 y0 = _mm512_loadu_ps(y + i +  0);
+        __m512 y1 = _mm512_loadu_ps(y + i + 16);
+        __m512 y2 = _mm512_loadu_ps(y + i + 32);
+        __m512 y3 = _mm512_loadu_ps(y + i + 48);
+        y0 = _mm512_fmadd_ps(x0, alpha_v, y0);
+        y1 = _mm512_fmadd_ps(x1, alpha_v, y1);
+        y2 = _mm512_fmadd_ps(x2, alpha_v, y2);
+        y3 = _mm512_fmadd_ps(x3, alpha_v, y3);
+        _mm512_storeu_ps(y + i +  0, y0);
+        _mm512_storeu_ps(y + i + 16, y1);
+        _mm512_storeu_ps(y + i + 32, y2);
+        _mm512_storeu_ps(y + i + 48, y3);
+    }
+    for (; i + 16 <= n; i += 16) {
+        __m512 xv = _mm512_loadu_ps(x + i);
+        __m512 yv = _mm512_loadu_ps(y + i);
+        yv = _mm512_fmadd_ps(xv, alpha_v, yv);
+        _mm512_storeu_ps(y + i, yv);
+    }
+#elif defined(__AVX2__)
+    const __m256 alpha_v = _mm256_set1_ps(alpha);
+    for (; i + 32 <= n; i += 32) {
+        __m256 x0 = _mm256_loadu_ps(x + i +  0);
+        __m256 x1 = _mm256_loadu_ps(x + i +  8);
+        __m256 x2 = _mm256_loadu_ps(x + i + 16);
+        __m256 x3 = _mm256_loadu_ps(x + i + 24);
+        __m256 y0 = _mm256_loadu_ps(y + i +  0);
+        __m256 y1 = _mm256_loadu_ps(y + i +  8);
+        __m256 y2 = _mm256_loadu_ps(y + i + 16);
+        __m256 y3 = _mm256_loadu_ps(y + i + 24);
+        y0 = _mm256_fmadd_ps(x0, alpha_v, y0);
+        y1 = _mm256_fmadd_ps(x1, alpha_v, y1);
+        y2 = _mm256_fmadd_ps(x2, alpha_v, y2);
+        y3 = _mm256_fmadd_ps(x3, alpha_v, y3);
+        _mm256_storeu_ps(y + i +  0, y0);
+        _mm256_storeu_ps(y + i +  8, y1);
+        _mm256_storeu_ps(y + i + 16, y2);
+        _mm256_storeu_ps(y + i + 24, y3);
+    }
+    for (; i + 8 <= n; i += 8) {
+        __m256 xv = _mm256_loadu_ps(x + i);
+        __m256 yv = _mm256_loadu_ps(y + i);
+        yv = _mm256_fmadd_ps(xv, alpha_v, yv);
+        _mm256_storeu_ps(y + i, yv);
+    }
+#endif
+    for (; i < n; ++i) {
+        y[i] += x[i] * alpha;
+    }
+}
+
+static void ggml_axpy_q4_k_alphaf32(const int                  n,
+                                    const void * GGML_RESTRICT vx,
+                                    void * GGML_RESTRICT       vz,
+                                    float                      alpha) {
+    GGML_ASSERT(n % QK_K == 0);
+
+    const int                        n_blocks = n / QK_K;
+    const block_q4_K * GGML_RESTRICT x        = (const block_q4_K *) vx;
+    float * GGML_RESTRICT            result   = (float *) vz;
+    float                            tmp[QK_K];
+
+    for (int ib = 0; ib < n_blocks; ++ib) {
+        dequantize_row_q4_K(&x[ib], tmp, QK_K);
+        float * out = result + ib * QK_K;
+        ggml_axpy_f32_alphaf32(QK_K, tmp, out, alpha);
+    }
+}
+
+static void ggml_axpy_q6_k_alphaf32(const int                  n,
+                                    const void * GGML_RESTRICT vx,
+                                    void * GGML_RESTRICT       vz,
+                                    float                      alpha) {
+    GGML_ASSERT(n % QK_K == 0);
+
+    const int                        n_blocks = n / QK_K;
+    const block_q6_K * GGML_RESTRICT x        = (const block_q6_K *) vx;
+    float * GGML_RESTRICT            result   = (float *) vz;
+    float                            tmp[QK_K];
+
+    for (int ib = 0; ib < n_blocks; ++ib) {
+        dequantize_row_q6_K(&x[ib], tmp, QK_K);
+        float * out = result + ib * QK_K;
+        ggml_axpy_f32_alphaf32(QK_K, tmp, out, alpha);
+    }
+}
+
 static inline void ggml_writeback_avx(float * GGML_RESTRICT dst_ptr, const float * GGML_RESTRICT buf, const int n) {
     int i = 0;
 // TODO: support more SIMD types
@@ -2242,6 +2342,28 @@ static inline void ggml_compute_forward_axpy_sparse_rowwise_chunk(const struct g
 
             ggml_axpy_avx_q8_0_alphaf32(ne00, (const void *) (src0_ptr + nb01 * r), buf, alpha);
         }
+    } else if (src0->type == GGML_TYPE_Q4_K) {
+        const float * input_row = (const float *) ((const char *) input + t * nb11);
+
+        for (int64_t r = start_neu; r < end_neu; r++) {
+            float alpha = input_row[r];
+            if (cpu_mask[r] == 1|| sparse_idx[r] < 0.5f || alpha == 0.0f) {
+                continue;
+            }
+
+            ggml_axpy_q4_k_alphaf32(ne00, (const void *) (src0_ptr + nb01 * r), buf, alpha);
+        }
+    } else if (src0->type == GGML_TYPE_Q6_K) {
+        const float * input_row = (const float *) ((const char *) input + t * nb11);
+
+        for (int64_t r = start_neu; r < end_neu; r++) {
+            float alpha = input_row[r];
+            if (cpu_mask[r] == 1|| sparse_idx[r] < 0.5f || alpha == 0.0f) {
+                continue;
+            }
+
+            ggml_axpy_q6_k_alphaf32(ne00, (const void *) (src0_ptr + nb01 * r), buf, alpha);
+        }
     } else {
         GGML_ASSERT(false && "unsupported type in axpy_sparse");
     }
@@ -2283,7 +2405,7 @@ static void ggml_compute_forward_axpy_sparse_rowwise(const struct ggml_compute_p
     ggml_barrier(params->threadpool);
 
     // align precision
-    if (src1->type != vec_type && src0->type != GGML_TYPE_Q8_0) {
+    if (src1->type != vec_type && src0->type != GGML_TYPE_Q8_0 && src0->type != GGML_TYPE_Q4_K && src0->type != GGML_TYPE_Q6_K) {
         char * wdata_base = params->wdata;
         GGML_ASSERT(ne12 == 1 && ne13 == 1);
 
@@ -2308,14 +2430,15 @@ static void ggml_compute_forward_axpy_sparse_rowwise(const struct ggml_compute_p
     const int64_t weight_nb1 = nb01;
     const int64_t idx_nb1    = idx->nb[1];
     const int64_t input_nb1 =
-        (src1->type == vec_type || src0->type == GGML_TYPE_Q8_0) ? nb11 : ggml_type_size(vec_type) * ne10;
+        (src1->type == vec_type || src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_Q6_K) ? nb11 : ggml_type_size(vec_type) * ne10;
 
-    void * input = (src1->type != vec_type && src0->type != GGML_TYPE_Q8_0) ? params->wdata : src1->data;
+    void * input =
+        (src1->type != vec_type && src0->type != GGML_TYPE_Q8_0 && src0->type != GGML_TYPE_Q4_K && src0->type != GGML_TYPE_Q6_K) ? params->wdata : src1->data;
 
     float buf[ne00];
     memset(buf, 0, ne00 * sizeof(float));
 
-    int     K                = (src0->type == GGML_TYPE_Q8_0) ? 64 : 8;
+    int     K                = (src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_Q6_K) ? 64 : 8;
     int64_t chunks_per_token = nth * K;
     int64_t neu_per_thd      = (ne01 + chunks_per_token - 1) / chunks_per_token;
 
