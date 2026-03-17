@@ -126,7 +126,7 @@ void sparkinfer_init_from_model_and_ctx(llama_model *   tgt_model,
     } else {
         GGML_ABORT("fatal error");
     }
-    vram_budget -= 384 * (1024 * 1024);
+    vram_budget -= 256 * (1024 * 1024);
     GGML_ASSERT(vram_budget > 0 && "no vram left for initializing cache manager");
 
     tgt_ctx->spif_cm = std::make_unique<sparkinfer_cache_manager>(tgt_model, spif_ms_path, vram_budget);
@@ -283,15 +283,14 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model,
     }
     ggml_backend_tensor_set(group_identity, f32_mat_buf.data(), 0, ggml_nbytes(group_identity));
 
-    std::vector<uint8_t> buf_reorder_src(ggml_row_size(GGML_TYPE_F32, n_embd) * n_ff);
-    std::vector<uint8_t> buf_reorder_dst(ggml_row_size(GGML_TYPE_F32, n_embd) * n_ff);
-    auto *               src_buf = buf_reorder_src.data();
-    auto *               dst_buf = buf_reorder_dst.data();
+    std::vector<uint8_t> src_buf_vec(sizeof(float) * n_embd * n_ff);
+    std::vector<uint8_t> dst_buf_vec(sizeof(float) * n_embd * n_ff);
+    auto *               src_buf = src_buf_vec.data();
+    auto *               dst_buf = dst_buf_vec.data();
 
     auto reorder_tensor_2d = [&](ggml_tensor * tensor, std::vector<int32_t> & perm) {
-        const auto n_cols        = tensor->ne[0];
         const auto n_rows        = ggml_nrows(tensor);
-        const auto row_size      = ggml_row_size(tensor->type, n_cols);
+        const auto row_size      = ggml_row_size(tensor->type, tensor->ne[0]);
         const auto row_stride    = tensor->nb[1];
         const auto tensor_nbytes = ggml_nbytes(tensor);
 
@@ -318,10 +317,12 @@ sparkinfer_cache_manager::sparkinfer_cache_manager(llama_model * model,
     auto reorder_if_exists = [&](ggml_tensor * tensor, std::vector<int32_t> & perm) {
         if (tensor) {
             GGML_ASSERT(ggml_is_contiguous(tensor));
-            if (tensor->ne[1] > 1) {
+            if (ggml_is_vector(tensor)) {
+                reorder_tensor_1d(tensor, perm);
+            } else if (ggml_is_matrix(tensor)) {
                 reorder_tensor_2d(tensor, perm);
             } else {
-                reorder_tensor_1d(tensor, perm);
+                GGML_ABORT("fatal error");
             }
         }
     };
